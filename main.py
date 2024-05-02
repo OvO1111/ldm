@@ -19,7 +19,7 @@ from pytorch_lightning.utilities.distributed import rank_zero_only
 from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.data.base import Txt2ImgIterableBaseDataset
-from models.util import instantiate_from_config
+from ldm.util import instantiate_from_config
 from einops import rearrange
 from scipy.ndimage import sobel
 from collections import namedtuple
