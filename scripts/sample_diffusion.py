@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 from PIL import Image
 
 from ldm.models.diffusion.ddim import DDIMSampler
-from models.util import instantiate_from_config
+from ldm.util import instantiate_from_config
 from torch.utils.data import DataLoader
 from einops import rearrange
 from torchvision.utils import make_grid
@@ -337,7 +337,6 @@ def run(model, logdir, batch_size=50, vanilla=False, custom_steps=None, eta=None
         os.makedirs(os.path.join(os.path.dirname(nppath), "pngs"), exist_ok=True)
         for ig, g in enumerate(npz_files["grid"]):
             Image.fromarray(g).save(os.path.join(os.path.dirname(nppath), "pngs", f"{ig}.png"))
-        # raise NotImplementedError('Currently only sampling for unconditional models supported.')
 
     print(f"sampling of {n_saved} images finished in {(time.time() - tstart) / 60.:.2f} minutes.")
 

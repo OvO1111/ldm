@@ -10,7 +10,6 @@ omegaconf==2.3.0
 opencv_python==4.1.2.30
 opencv_python_headless==4.8.1.78
 packaging==24.0
-Pillow==10.0.1
 Pillow==10.3.0
 pudb==2019.2
 pytorch_lightning==1.4.2
