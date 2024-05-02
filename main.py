@@ -1,4 +1,4 @@
-import argparse, os, sys, datetime, glob, importlib, csv
+import argparse, os, sys, datetime, glob, importlib, csv, re
 import numpy as np
 import time
 import torch
@@ -10,6 +10,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import random_split, DataLoader, Dataset, Subset
 from functools import partial
 from PIL import Image
+from queue import Queue
 
 from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
@@ -18,7 +19,52 @@ from pytorch_lightning.utilities.distributed import rank_zero_only
 from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.data.base import Txt2ImgIterableBaseDataset
-from ldm.util import instantiate_from_config
+from models.util import instantiate_from_config
+from einops import rearrange
+from scipy.ndimage import sobel
+from collections import namedtuple
+
+
+def combine_mask_and_im(x, overlay_coef=0.2):
+    # b 2 h w (d)
+    if len(x.shape) == 5: ndim = 3
+    if len(x.shape) == 4: ndim = 2
+    def find_mask_boundaries_nd(im, mask, color):
+        boundaries = torch.zeros_like(mask)
+        for i in range(1, 12):
+            m = (mask == i).numpy()
+            sobel_x = sobel(m, axis=1, mode='constant')
+            sobel_y = sobel(m, axis=2, mode='constant')
+            if ndim == 3:
+                sobel_z = sobel(m, axis=3, mode='constant')
+
+            boundaries = torch.from_numpy((np.abs(sobel_x) + np.abs(sobel_y) + (0 if ndim == 2 else np.abs(sobel_z))) * i) * (boundaries == 0) + boundaries * (boundaries != 0)
+        im = color[boundaries.long()] * (boundaries[..., None] > 0) + im * (boundaries[..., None] == 0)
+        return im
+    
+    image, mask = 255 * x[:, 0, ..., None].clamp(0, 1).repeat(*([1] * (ndim+1)), 3),\
+        x[:, 1] * 12
+    mask[mask == 255] = 11
+    OrganClass = namedtuple("OrganClass", ["label_name", "totalseg_id", "color"])
+    abd_organ_classes = [
+        OrganClass("unlabeled", 0, (0, 0, 0)),
+        OrganClass("spleen", 1, (0, 80, 100)),
+        OrganClass("kidney_left", 2, (119, 11, 32)),
+        OrganClass("kidney_right", 3, (119, 11, 32)),
+        OrganClass("liver", 5, (250, 170, 30)),
+        OrganClass("stomach", 6, (220, 220, 0)),
+        OrganClass("pancreas", 10, (107, 142, 35)),
+        OrganClass("small_bowel", 55, (255, 0, 0)),
+        OrganClass("duodenum", 56, (70, 130, 180)),
+        OrganClass("colon", 57, (0, 0, 255)),
+        OrganClass("urinary_bladder", 104, (0, 255, 255)),
+        OrganClass("colorectal_cancer", 255, (0, 255, 0))
+    ]
+    colors = torch.from_numpy(np.array([a.color for a in abd_organ_classes]))
+    colored_mask = (colors[mask.long()] * (mask[..., None] > 0) + image * (mask[..., None] == 0))
+    colored_im = colored_mask * overlay_coef + image * (1-overlay_coef)
+    colored_im = rearrange(find_mask_boundaries_nd(colored_im, mask, colors), "b ... c -> b c ...")
+    return colored_im
 
 
 def get_parser(**parser_kwargs):
@@ -65,7 +111,7 @@ def get_parser(**parser_kwargs):
         "--train",
         type=str2bool,
         const=True,
-        default=False,
+        default=True,
         nargs="?",
         help="train",
     )
@@ -109,7 +155,7 @@ def get_parser(**parser_kwargs):
         "-l",
         "--logdir",
         type=str,
-        default="logs",
+        default="/mnt/data/smart_health_02/dailinrui/data/pretrained/ldm",
         help="directory for logging dat shit",
     )
     parser.add_argument(
@@ -202,18 +248,18 @@ class DataModuleFromConfig(pl.LightningDataModule):
             init_fn = None
         return DataLoader(self.datasets["train"], batch_size=self.batch_size,
                           num_workers=self.num_workers, shuffle=False if is_iterable_dataset else True,
-                          worker_init_fn=init_fn)
+                          worker_init_fn=init_fn, collate_fn=self.datasets["train"].collate)
 
-    def _val_dataloader(self, shuffle=False):
+    def _val_dataloader(self, shuffle=False, batch_size=None):
         if isinstance(self.datasets['validation'], Txt2ImgIterableBaseDataset) or self.use_worker_init_fn:
             init_fn = worker_init_fn
         else:
             init_fn = None
         return DataLoader(self.datasets["validation"],
-                          batch_size=self.batch_size,
+                          batch_size=self.batch_size if batch_size is None else batch_size,
                           num_workers=self.num_workers,
                           worker_init_fn=init_fn,
-                          shuffle=shuffle)
+                          shuffle=shuffle, collate_fn=self.datasets["validation"].collate)
 
     def _test_dataloader(self, shuffle=False):
         is_iterable_dataset = isinstance(self.datasets['train'], Txt2ImgIterableBaseDataset)
@@ -255,11 +301,11 @@ class SetupCallback(Callback):
             trainer.save_checkpoint(ckpt_path)
 
     def on_pretrain_routine_start(self, trainer, pl_module):
+        os.makedirs(self.logdir, exist_ok=True)
+        os.makedirs(self.ckptdir, exist_ok=True)
+        os.makedirs(self.cfgdir, exist_ok=True)
         if trainer.global_rank == 0:
             # Create logdirs and save configs
-            os.makedirs(self.logdir, exist_ok=True)
-            os.makedirs(self.ckptdir, exist_ok=True)
-            os.makedirs(self.cfgdir, exist_ok=True)
 
             if "callbacks" in self.lightning_config:
                 if 'metrics_over_trainsteps_checkpoint' in self.lightning_config['callbacks']:
@@ -284,12 +330,14 @@ class SetupCallback(Callback):
                     os.rename(self.logdir, dst)
                 except FileNotFoundError:
                     pass
+                except FileExistsError:
+                    pass
 
 
 class ImageLogger(Callback):
     def __init__(self, batch_frequency, max_images, clamp=True, increase_log_steps=True,
                  rescale=True, disabled=False, log_on_batch_idx=False, log_first_step=False,
-                 log_images_kwargs=None):
+                 log_images_kwargs=None, save_num=30, rescale_fn=None):
         super().__init__()
         self.rescale = rescale
         self.batch_freq = batch_frequency
@@ -305,37 +353,68 @@ class ImageLogger(Callback):
         self.log_on_batch_idx = log_on_batch_idx
         self.log_images_kwargs = log_images_kwargs if log_images_kwargs else {}
         self.log_first_step = log_first_step
+        self.keep_queue = Queue(save_num)
+        self.rescale_fn = lambda x: (x + 1) / 2. if rescale_fn is None else \
+            lambda x: torch.clamp(x*20, 0, 1) if rescale_fn == "clamp" else None
 
     @rank_zero_only
     def _testtube(self, pl_module, images, batch_idx, split):
+        random = np.random.randint(images[list(images.keys())[0]].shape[2])
         for k in images:
-            grid = torchvision.utils.make_grid(images[k])
-            grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
+            _im = images[k]
+            if len(_im.shape) == 5: _im = _im[:, :, random]
+            grid = torchvision.utils.make_grid(_im.contiguous().view((-1, 1) + _im.shape[-2:]), nrow=_im.shape[0])
+            if self.rescale:
+                grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
 
             tag = f"{split}/{k}"
             pl_module.logger.experiment.add_image(
                 tag, grid,
                 global_step=pl_module.global_step)
+            
+    @staticmethod
+    def _maybe_mkdir(path):
+        if not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
+        return path
+    
+    def _enqueue_and_dequeue(self, entry):
+        if self.keep_queue.full():
+            to_remove = self.keep_queue.get_nowait()
+            os.remove(to_remove)
+        self.keep_queue.put_nowait(entry)
 
     @rank_zero_only
     def log_local(self, save_dir, split, images,
                   global_step, current_epoch, batch_idx):
         root = os.path.join(save_dir, "images", split)
+        random = np.random.randint(images[list(images.keys())[0]].shape[2])
         for k in images:
-            grid = torchvision.utils.make_grid(images[k], nrow=4)
-            if self.rescale:
-                grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
+            _im = images[k].contiguous()
+            if len(_im.shape) == 5: _im = rearrange(_im, "b c d w h -> (b d) c w h")
+            grid = torchvision.utils.make_grid(rearrange(_im, "b c h w -> (b c) 1 h w"))
+            ### force rescale conditioning:
+            if k == "conditioning":
+                if _im.shape[1] == 2:
+                    grid = torchvision.utils.make_grid(combine_mask_and_im(_im))
+            # if self.rescale:
+            #     grid = self.rescale_fn(grid)  # -1,1 -> 0,1; c,h,w
             grid = grid.transpose(0, 1).transpose(1, 2).squeeze(-1)
             grid = grid.numpy()
-            grid = (grid * 255).astype(np.uint8)
+            if grid.min() >= 0 and grid.max() <= 1:
+                grid = (grid * 255).astype(np.uint8)
+            else:
+                grid = ((grid - grid.min()) / (grid.max() - grid.min()) * 255).astype(np.uint8)
             filename = "{}_gs-{:06}_e-{:06}_b-{:06}.png".format(
                 k,
                 global_step,
                 current_epoch,
                 batch_idx)
-            path = os.path.join(root, filename)
-            os.makedirs(os.path.split(path)[0], exist_ok=True)
+            path = os.path.join(root, k, filename)
+            # os.makedirs(os.path.split(path)[0], exist_ok=True)
+            self._maybe_mkdir(os.path.split(path)[0])
             Image.fromarray(grid).save(path)
+            self._enqueue_and_dequeue(path)
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):
         check_idx = batch_idx if self.log_on_batch_idx else pl_module.global_step
@@ -457,7 +536,8 @@ if __name__ == "__main__":
     #           params:
     #               key: value
 
-    now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    # now = datetime.datetime.now().strftime("%Y-%m-%d")
+    now = "static"
 
     # add cwd for convenience and to make classes in this file available when
     # running as `python main.py`
@@ -507,6 +587,8 @@ if __name__ == "__main__":
 
     ckptdir = os.path.join(logdir, "checkpoints")
     cfgdir = os.path.join(logdir, "configs")
+    os.makedirs(ckptdir, exist_ok=True)
+    os.makedirs(cfgdir, exist_ok=True)
     seed_everything(opt.seed)
 
     try:
@@ -518,15 +600,17 @@ if __name__ == "__main__":
         # merge trainer cli with config
         trainer_config = lightning_config.get("trainer", OmegaConf.create())
         # default to ddp
-        trainer_config["accelerator"] = "ddp"
+        trainer_config["strategy"] = "ddp"
+        trainer_config["accelerator"] = "gpu"
         for k in nondefault_trainer_args(opt):
             trainer_config[k] = getattr(opt, k)
         if not "gpus" in trainer_config:
-            del trainer_config["accelerator"]
+            del trainer_config["strategy"], trainer_config["accelerator"]
             cpu = True
         else:
             gpuinfo = trainer_config["gpus"]
             print(f"Running on GPUs {gpuinfo}")
+            trainer_config["devices"] = len(re.sub(r"[^0-9]+", "", gpuinfo))
             cpu = False
         trainer_opt = argparse.Namespace(**trainer_config)
         lightning_config.trainer = trainer_config
@@ -553,6 +637,7 @@ if __name__ == "__main__":
                 "params": {
                     "name": "testtube",
                     "save_dir": logdir,
+                    "version": 0
                 }
             },
         }
@@ -608,7 +693,9 @@ if __name__ == "__main__":
                 "params": {
                     "batch_frequency": 750,
                     "max_images": 4,
-                    "clamp": True
+                    "clamp": True,
+                    "rescale": False,
+                    "rescale_fn": "clamp"
                 }
             },
             "learning_rate_logger": {
@@ -667,8 +754,8 @@ if __name__ == "__main__":
         data.prepare_data()
         data.setup()
         print("#### Data #####")
-        for k in data.datasets:
-            print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")
+        # for k in data.datasets:
+        #     print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")
 
         # configure learning rate
         bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate

@@ -1,16 +1,73 @@
-import argparse, os, sys, glob, datetime, yaml
+import argparse, os, sys, glob, datetime, yaml, json, pathlib as pb, re
 import torch
 import time
-import numpy as np
+import numpy as np, nibabel as nib
 from tqdm import trange
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from omegaconf import OmegaConf
 from PIL import Image
 
 from ldm.models.diffusion.ddim import DDIMSampler
-from ldm.util import instantiate_from_config
+from models.util import instantiate_from_config
+from torch.utils.data import DataLoader
+from einops import rearrange
+from torchvision.utils import make_grid
+from tqdm import tqdm
+from functools import reduce
+from collections import namedtuple
+from scipy.ndimage import sobel, zoom, distance_transform_edt
 
 rescale = lambda x: (x + 1.) / 2.
+
+def combine_mask_and_im(x, overlay_coef=0.2):
+    # 2 h w d
+    def find_mask_boundaries_3d(im, mask, color):
+        boundaries = torch.zeros_like(mask)
+        for i in tqdm(range(1, 12), desc="paint array"):
+            m = (mask == i).numpy()
+            sobel_x = sobel(m, axis=0, mode='constant')
+            sobel_y = sobel(m, axis=1, mode='constant')
+            sobel_z = sobel(m, axis=2, mode='constant')
+
+            boundaries = torch.from_numpy((np.abs(sobel_x) + np.abs(sobel_y) + np.abs(sobel_z)) * i) * (boundaries == 0) + boundaries * (boundaries != 0)
+        im = color[boundaries.long()] * (boundaries[..., None] > 0) + im * (boundaries[..., None] == 0)
+        return im
+    
+    image, mask = 255 * x[0, ..., None].clamp(0, 1).repeat(1, 1, 1, 3), x[1] * 11
+    mask[mask == 255] = 11
+    OrganClass = namedtuple("OrganClass", ["label_name", "totalseg_id", "color"])
+    abd_organ_classes = [
+        OrganClass("unlabeled", 0, (0, 0, 0)),
+        OrganClass("spleen", 1, (0, 80, 100)),
+        OrganClass("kidney_left", 2, (119, 11, 32)),
+        OrganClass("kidney_right", 3, (119, 11, 32)),
+        OrganClass("liver", 5, (250, 170, 30)),
+        OrganClass("stomach", 6, (220, 220, 0)),
+        OrganClass("pancreas", 10, (107, 142, 35)),
+        OrganClass("small_bowel", 55, (255, 0, 0)),
+        OrganClass("duodenum", 56, (70, 130, 180)),
+        OrganClass("colon", 57, (0, 0, 255)),
+        OrganClass("urinary_bladder", 104, (0, 255, 255)),
+        OrganClass("colorectal_cancer", 255, (0, 255, 0))
+    ]
+    colors = torch.from_numpy(np.array([a.color for a in abd_organ_classes]))
+    colored_mask = (colors[mask.long()] * (mask[..., None] > 0) + image * (mask[..., None] == 0))
+    colored_im = colored_mask * overlay_coef + image * (1-overlay_coef)
+    colored_im = rearrange(find_mask_boundaries_3d(colored_im, mask, colors), "d ... c -> d c ...")
+    return colored_im
+
+
+def find_vacancy(path):
+    path = pb.Path(path)
+    d, f, s = path.parent, path.name, ".".join([""] + path.name.split(".")[1:])
+    exist_files = list(_.name for _ in d.glob(f"*{s}"))
+    file_num = list(int(([-1] + re.findall(r"\d+", _))[-1]) for _ in exist_files)
+    fa = [i for i in range(1000) if i not in file_num]
+    vacancy = d / (f.split(s)[0] + str(fa[0]) + s)
+    print("found vacancy at ", f.split(s)[0] + str(fa[0]) + s)
+    return vacancy
+    
 
 def custom_to_pil(x):
     x = x.detach().cpu()
@@ -105,7 +162,119 @@ def make_convolutional_sample(model, batch_size, vanilla=False, custom_steps=Non
     print(f'Throughput for this batch: {log["throughput"]}')
     return log
 
-def run(model, logdir, batch_size=50, vanilla=False, custom_steps=None, eta=None, n_samples=50000, nplog=None):
+@ torch.no_grad()
+def sample_cond(model, instance, scale=1., n_samples=1, ddim_steps=100, ddim_eta=1, vanilla=False,
+                sample_path="/mnt/workspace/dailinrui/code/multimodal/latentdiffusion/samples",
+                postpone_metric_computation=False, wholemask=None):
+    # metrics = compute_metrics(torch.clamp(gt*1.5, 0, 1), torch.clamp(gt*1.5, 0, 1))
+    prompt = instance.get("text", None)
+    sampler = DDIMSampler(model)
+    shape = (1, 64, 128, 128)  # cdhw/chw, for output shape
+    # with model.ema_scope():
+    #     gt = model.get_input(instance, "mask")[0]
+    #     # uc = model.get_learned_conditioning(n_samples * [""]) if scale != 1. else None
+    #     c = model.get_learned_conditioning(n_samples * prompt)
+    #     if not vanilla:
+    #         input_shape = shape
+    #         samples, _ = sampler.sample(S=ddim_steps,
+    #                                     dims=len(shape) - 1,
+    #                                     conditioning=c,
+    #                                     batch_size=len(prompt) * n_samples,
+    #                                     shape=input_shape,
+    #                                     verbose=False,
+    #                                     # unconditional_guidance_scale=scale,
+    #                                     # unconditional_conditioning=uc,
+    #                                     eta=ddim_eta)
+    #     else:
+    #         output_shape = shape
+    #         samples, _ = model.p_sample_loop(c, (len(prompt) * n_samples,) + output_shape,
+    #                                return_intermediates=True, verbose=True)
+
+    #     pred = model.decode_first_stage(samples)
+    #     pred = torch.clamp((pred + 1.0)/ 2.0, min=0.0, max=1.0)
+            
+    with model.ema_scope():
+        # wholemask = model.get_input(instance, "wholemask")[0].cuda()
+        gt = instance.get("wholeimage").permute(0, 4, 1, 2, 3).cuda()
+        # wholemask = nib.load("/mnt/workspace/dailinrui/data/pretrained/ccdm/final_ernie_resize_to_64x128x128_w1/eval/RJ202302171638329080/pred.nii.gz").dataobj[:].transpose(2, 1, 0)
+        # wholemask = torch.rot90(torch.from_numpy(zoom(wholemask, np.array((96, 512, 512)) / np.array(wholemask.shape), order=0)), dims=(1, 2), k=3)[None, None].cuda() / 255.
+        wholemask = wholemask.permute(0, 4, 1, 2, 3).cuda()
+        start_layer, end_layer = torch.where(wholemask.sum((0, 1, 3, 4)))[0][[0, -1]]
+        shape = (4, 64, 64)
+        assert wholemask.shape[0] == 1,  "batch size should be 1"
+        samples = torch.zeros((n_samples,) + wholemask.shape[1:], dtype=torch.float32, device=wholemask.device)
+        gen_mask = wholemask.repeat(n_samples, 1, 1, 1, 1)
+
+        for m_ in tqdm(range(start_layer.item()-1, end_layer.item()+1), desc="slicewise image creation"):
+            concat_cond = torch.cat([samples[:, :, max(0, m_ - 1)],
+                                     gen_mask[:, :, m_]], axis=1)
+            c = model.get_learned_conditioning(concat_cond)
+            s, _ = sampler.sample(S=ddim_steps,
+                                    dims=len(shape) - 1,
+                                    conditioning=c,
+                                    batch_size=n_samples,
+                                    shape=shape,
+                                    verbose=False,
+                                    # unconditional_guidance_scale=scale,
+                                    # unconditional_conditioning=uc,
+                                    )#eta=ddim_eta)  # (num_images bs d h w)
+            ds = model.decode_first_stage(s)
+            samples[:, :, m_] = (ds - ds.min()) / (ds.max() - ds.min())
+            Image.fromarray(make_grid(255 * torch.cat([concat_cond[:, 0:1], concat_cond[:, 1:] * 20, samples[:,:, m_]], dim=1).cpu().permute(1, 0, 2, 3), padding=5).permute(1, 2, 0).numpy().astype(np.uint8)).save(f"./samples/layers/{m_}.png")
+        pred = torch.cat([samples, gen_mask], dim=1)
+    
+    # gt = instance["wholeimage"]
+    # b, d, *shp = gt.shape
+    # gt = torch.nn.functional.interpolate(gt, (512, 512), mode="bilinear")
+    # samples = torch.zeros((b, d - 2, 512, 512), dtype=gt.dtype).cuda()
+    # for image_mid_index in tqdm(range(d - 2), desc="slicewise autoencoder embedding"):
+    #     concat_cond = gt[:, image_mid_index: image_mid_index + 3].cuda()
+    #     xrec, _ = model(concat_cond)
+    #     samples[:, image_mid_index - 1] = xrec[:, 1]
+    # pred = torch.nn.functional.interpolate(samples, shp, mode="bilinear")[None]
+    # pred = (pred - pred.min()) / (pred.max() - pred.min())
+        
+    if postpone_metric_computation: to_compute = []
+    else: to_compute = ["lpips", "fvd"]
+    metrics = compute_metrics(pred, pred, to_compute)
+
+    if len(pred.shape) == 5: # 3d
+        for ix, x_sample in enumerate(pred):
+            c, *_shp = x_sample.shape
+            if c == 1: 
+                x_sample = 255. * x_sample.cpu().permute(1, 0, 2, 3)
+                grid = make_grid(x_sample, nrow=8, padding=5).permute(1, 2, 0).numpy().astype(np.uint8)
+                if x_sample.shape[0] > 100:
+                    import SimpleITK as sitk
+                    sitk.WriteImage(sitk.GetImageFromArray(x_sample[:, 0].numpy().astype(np.float32)),
+                                    find_vacancy(os.path.join(sample_path, "sample.nii.gz")))
+                else:
+                    Image.fromarray(
+                        grid
+                    ).save(find_vacancy(os.path.join(sample_path, f"sample.png")))
+                
+            if c == 2: 
+                x_sample = combine_mask_and_im(x_sample.cpu())
+                grid = make_grid(x_sample, nrow=8, padding=5).permute(1, 2, 0).numpy().astype(np.uint8)
+                Image.fromarray(
+                    grid
+                ).save(find_vacancy(os.path.join(sample_path, f"sample.png")))
+            # x_sample = 255. * rearrange(x_sample.cpu(), 'c d h w -> (c d) 1 h w')
+    if len(pred.shape) == 4: # 2d
+        for x_sample in pred:
+            grid = 255 * rearrange(x_sample.cpu().numpy(), 'c h w -> (c h) w 1').astype(np.uint8)
+            Image.fromarray(
+                grid
+            ).save(find_vacancy(os.path.join(sample_path, f"sample.png")))
+    metrics["pred"] = pred.cpu().numpy()
+    metrics["gt"] = gt.cpu().numpy()
+    metrics["cond"] = prompt
+    metrics["grid"] = grid[None]
+    return metrics
+                
+
+def run(model, logdir, batch_size=50, vanilla=False, custom_steps=None, eta=None, n_samples=1,
+        nplog=None, dataloader=None, postpone_metric_computation=False, stage_1_results=None):
     if vanilla:
         print(f'Using Vanilla DDPM sampling with {model.num_timesteps} sampling steps.')
     else:
@@ -115,7 +284,7 @@ def run(model, logdir, batch_size=50, vanilla=False, custom_steps=None, eta=None
     tstart = time.time()
     n_saved = len(glob.glob(os.path.join(logdir,'*.png')))-1
     # path = logdir
-    if model.cond_stage_model is None:
+    if hasattr(model, "cond_stage_model") and model.cond_stage_model is None:
         all_images = []
 
         print(f"Running unconditional sampling for {n_samples} samples")
@@ -135,7 +304,40 @@ def run(model, logdir, batch_size=50, vanilla=False, custom_steps=None, eta=None
         np.savez(nppath, all_img)
 
     else:
-       raise NotImplementedError('Currently only sampling for unconditional models supported.')
+        assert dataloader is not None
+        logs = []
+        nppath = os.path.join(nplog, f"all_samples.npz")
+        # if not os.path.exists(nppath):
+        if True:
+            if stage_1_results is not None:
+                stage_1_results_fs = os.listdir(stage_1_results)
+                for item in stage_1_results_fs:
+                    mask = nib.load(os.path.join(stage_1_results, item)).dataobj[:]
+                    logs.append(sample_cond(model, batch, 
+                                            n_samples=n_samples, ddim_steps=custom_steps, ddim_eta=eta,
+                                            vanilla=vanilla, postpone_metric_computation=postpone_metric_computation, wholemask=mask))
+            else:
+                for batch in tqdm(dataloader, desc="validation loader"):
+                    logs.append(sample_cond(model, batch, 
+                                            n_samples=n_samples, ddim_steps=custom_steps, ddim_eta=eta,
+                                            vanilla=vanilla, postpone_metric_computation=postpone_metric_computation, wholemask=batch["wholemask"]))
+            npz_files = dict(pred=np.concatenate([l["pred"] for l in logs], axis=0),
+                            gt=np.concatenate([l["gt"] for l in logs], axis=0),
+                            grid=np.concatenate([l["grid"] for l in logs], axis=0),
+                            cond=np.array(reduce(lambda x, y: x+ y, [l["cond"] for l in logs])))
+            torch.cuda.empty_cache()
+            np.savez(nppath, **npz_files)
+        else:
+            npz_files = np.load(nppath)
+        
+        # if postpone_metric_computation:
+        #     metrics = compute_metrics(npz_files["pred"], npz_files["gt"], batch_per_segment=3)
+        # with open(nppath.replace("all_samples.npz", "all_metrics.json"), "w") as f:
+        #     json.dump(metrics, f, indent=4, ensure_ascii=False)
+        os.makedirs(os.path.join(os.path.dirname(nppath), "pngs"), exist_ok=True)
+        for ig, g in enumerate(npz_files["grid"]):
+            Image.fromarray(g).save(os.path.join(os.path.dirname(nppath), "pngs", f"{ig}.png"))
+        # raise NotImplementedError('Currently only sampling for unconditional models supported.')
 
     print(f"sampling of {n_saved} images finished in {(time.time() - tstart) / 60.:.2f} minutes.")
 
@@ -174,7 +376,7 @@ def get_parser():
         type=int,
         nargs="?",
         help="number of samples to draw",
-        default=50000
+        default=1
     )
     parser.add_argument(
         "-e",
@@ -212,7 +414,13 @@ def get_parser():
         type=int,
         nargs="?",
         help="the bs",
-        default=10
+        default=1
+    )
+    parser.add_argument(
+        "--inputs",
+        type=str,
+        help="the inputs folder from stage 1",
+        default=None
     )
     return parser
 
@@ -239,6 +447,62 @@ def load_model(config, ckpt, gpu, eval_mode):
     return model, global_step
 
 
+@torch.no_grad()
+def compute_metrics(pred, gt, metrics=["lpips", "fvd"], batch_per_segment=None):
+    results = dict()
+    if len(metrics) == 0: return results
+    if not isinstance(pred, torch.Tensor):
+        pred = torch.from_numpy(pred)
+    if not isinstance(gt, torch.Tensor):
+        gt = torch.from_numpy(gt)
+    pred, gt = pred.cuda(), gt.cuda()
+        
+    b, c, *shp = pred.shape
+    if batch_per_segment is None: batch_per_segment = b
+    assert pred.shape == gt.shape
+    if c != 1:
+        pred = rearrange(pred, "b c ... -> (b c) 1 ...")
+        gt = rearrange(gt, "b c ... -> (b c) 1 ...")
+    
+    for segment in tqdm(range(0, b, batch_per_segment)):
+        _pred = pred[segment: segment + batch_per_segment]
+        _gt = gt[segment: segment + batch_per_segment]
+        
+        if "lpips" in metrics:
+            from ldm.modules.losses.lpips import LPIPS
+            
+            # mean of 3 views
+            def _compute(x, y):
+                perceptual = LPIPS().to(x.device).eval()
+                if len(x.shape) == 5:
+                    lpips_x = perceptual(rearrange(x, "b c d h w -> (b d) c h w"),
+                                        rearrange(y, "b c d h w -> (b d) c h w")).mean()
+                    lpips_y = perceptual(rearrange(x, "b c d h w -> (b h) c d w"),
+                                        rearrange(y, "b c d h w -> (b h) c d w")).mean()
+                    lpips_z = perceptual(rearrange(x, "b c d h w -> (b w) c d h"),
+                                        rearrange(y, "b c d h w -> (b w) c d h")).mean()
+                    lpips_val = (lpips_x + lpips_y + lpips_z) / 3
+                else:
+                    lpips_val = perceptual(x, y)
+                return lpips_val
+            
+            results["lpips"] = results.get("lpips", 0) + _compute(_pred, _gt) * batch_per_segment / b
+            
+        if "fvd" in metrics:
+            from scripts.fvd import compute_fvd
+            
+            assert len(_pred.shape) == 5
+            assert b > 1
+            try:
+                results["fvd"] = results.get("fvd", 0) + \
+                    compute_fvd(rearrange(_pred, "b c d h w -> b d h w c").repeat(1, 1, 1, 1, 3),
+                                rearrange(_gt, "b c d h w -> b d h w c").repeat(1, 1, 1, 1, 3)) * batch_per_segment / b
+            except Exception as e:
+                results["fvd"] = results.get("fvd", 0) * (b) / (b-1)
+            
+    return results
+
+
 if __name__ == "__main__":
     now = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     sys.path.append(os.getcwd())
@@ -253,7 +517,7 @@ if __name__ == "__main__":
     if os.path.isfile(opt.resume):
         # paths = opt.resume.split("/")
         try:
-            logdir = '/'.join(opt.resume.split('/')[:-1])
+            logdir = '/'.join(opt.resume.split('/')[:-2])
             # idx = len(paths)-paths[::-1].index("logs")+1
             print(f'Logdir is {logdir}')
         except ValueError:
@@ -266,7 +530,7 @@ if __name__ == "__main__":
         logdir = opt.resume.rstrip("/")
         ckpt = os.path.join(logdir, "model.ckpt")
 
-    base_configs = sorted(glob.glob(os.path.join(logdir, "config.yaml")))
+    base_configs = sorted(glob.glob(os.path.join(logdir, "configs/*.yaml")))
     opt.base = base_configs
 
     configs = [OmegaConf.load(cfg) for cfg in opt.base]
@@ -288,12 +552,12 @@ if __name__ == "__main__":
     print(f"global step: {global_step}")
     print(75 * "=")
     print("logging to:")
-    logdir = os.path.join(logdir, "samples", f"{global_step:08}", now)
+    logdir = os.path.join(logdir, "samples")
     imglogdir = os.path.join(logdir, "img")
     numpylogdir = os.path.join(logdir, "numpy")
 
-    os.makedirs(imglogdir)
-    os.makedirs(numpylogdir)
+    os.makedirs(logdir, exist_ok=True)
+    # os.makedirs(numpylogdir, exist_ok=True)
     print(logdir)
     print(75 * "=")
 
@@ -304,10 +568,17 @@ if __name__ == "__main__":
     with open(sampling_file, 'w') as f:
         yaml.dump(sampling_conf, f, default_flow_style=False)
     print(sampling_conf)
-
+    
+    data = instantiate_from_config(config.data)
+    data.prepare_data()
+    data.setup()
+    print("#### Data #####")
+    for k in data.datasets:
+        print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")
+    dataloader = DataLoader(data.datasets["validation"], batch_size=opt.batch_size, shuffle=False)
 
     run(model, imglogdir, eta=opt.eta,
         vanilla=opt.vanilla_sample,  n_samples=opt.n_samples, custom_steps=opt.custom_steps,
-        batch_size=opt.batch_size, nplog=numpylogdir)
+        batch_size=opt.batch_size, nplog=logdir, dataloader=dataloader, postpone_metric_computation=True, stage_1_results=opt.inputs)
 
     print("done.")

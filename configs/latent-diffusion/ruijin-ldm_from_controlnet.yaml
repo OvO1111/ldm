@@ -1,0 +1,96 @@
+model:
+  base_learning_rate: 2.0e-06
+  target: ldm.models.diffusion.ddpm.LatentDiffusion
+  params:
+    linear_start: 0.0015
+    linear_end: 0.0195
+    num_timesteps_cond: 1
+    log_every_t: 200
+    timesteps: 1000
+    first_stage_key: image
+    cond_stage_key: mask
+    image_size: 512
+    channels: 1
+    dims: 2
+    monitor: val/loss_simple_ema
+
+    unet_config:
+      target: ldm.modules.diffusionmodules.openaimodel.UNetModel
+      params:
+        dims: 2
+        image_size: 512
+        in_channels: 3
+        out_channels: 1
+        model_channels: 128
+        attention_resolutions:
+        # note: this isn\t actually the resolution but
+        # the downsampling factor, i.e. this corresnponds to
+        # attention on spatial resolution 8,16,32, as the
+        # spatial reolution of the latents is 64 for f4
+        - 32
+        - 16
+        - 8
+        num_res_blocks: 2
+        channel_mult:
+        - 1
+        - 2
+        - 4
+        - 4
+        - 5
+        num_head_channels: 32
+    first_stage_config: __is_no_first_stage__
+      # target: ldm.models.autoencoder.AutoencoderKL
+      # params:
+      #   ckpt_path: /mnt/workspace/dailinrui/data/pretrained/ldm/static_ae_kl_ruijin_2x512x512_pimage_and_mask/checkpoints/last.ckpt
+      #   embed_dim: 4
+      #   monitor: "val/rec_loss"
+      #   dims: 2
+      #   ddconfig:
+      #     double_z: true
+      #     z_channels: 4
+      #     resolution: 512
+      #     in_channels: 2
+      #     out_ch: 2
+      #     ch: 96
+      #     ch_mult:
+      #     - 1
+      #     - 2
+      #     - 4
+      #     - 4
+      #     num_res_blocks: 2
+      #     dropout: 0.0
+      #     dims: 2
+      #     attn_resolutions:
+      #     - 16
+      #     - 8
+      #   lossconfig:
+      #     target: torch.nn.Identity
+    cond_stage_config: 
+      target: ldm.modules.encoders.modules.IdentityEncoder
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 1
+    num_workers: 5
+    wrap: false
+    train:
+      target: ldm.data.ruijin_pimage_and_mask.PretrainDataset
+      params:
+        split: train
+    validation:
+      target: ldm.data.ruijin_pimage_and_mask.PretrainDataset
+      params:
+        split: val
+
+
+lightning:
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        batch_frequency: 5000
+        max_images: 8
+        increase_log_steps: False
+
+  trainer:
+    benchmark: True
