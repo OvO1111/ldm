@@ -29,7 +29,7 @@ def convert_module_to_f32(x):
 
 
 ## go
-class AttentionPool2d(nn.Module):
+class AttentionPool(nn.Module):
     """
     Adapted from CLIP: https://github.com/openai/CLIP/blob/main/clip/model.py
     """
@@ -110,7 +110,7 @@ class Upsample(nn.Module):
         assert x.shape[1] == self.channels
         if self.dims == 3:
             x = F.interpolate(
-                x, (x.shape[2], x.shape[3] * 2, x.shape[4] * 2), mode="nearest"
+                x, (x.shape[2] * 2, x.shape[3] * 2, x.shape[4] * 2), mode="nearest"
             )
         else:
             x = F.interpolate(x, scale_factor=2, mode="nearest")
@@ -120,12 +120,15 @@ class Upsample(nn.Module):
 
 class TransposedUpsample(nn.Module):
     'Learned 2x upsampling without padding'
-    def __init__(self, channels, out_channels=None, ks=5):
+    def __init__(self, channels, out_channels=None, ks=5, dims=2):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
 
-        self.up = nn.ConvTranspose2d(self.channels,self.out_channels,kernel_size=ks,stride=2)
+        if dims == 2:
+            self.up = nn.ConvTranspose2d(self.channels,self.out_channels,kernel_size=ks,stride=2)
+        elif dims == 3:
+            self.up = nn.ConvTranspose3d(self.channels,self.out_channels,kernel_size=ks,stride=2)
 
     def forward(self,x):
         return self.up(x)
@@ -146,7 +149,7 @@ class Downsample(nn.Module):
         self.out_channels = out_channels or channels
         self.use_conv = use_conv
         self.dims = dims
-        stride = 2 if dims != 3 else (1, 2, 2)
+        stride = 2 if dims != 3 else (2, 2, 2)
         if use_conv:
             self.op = conv_nd(
                 dims, self.channels, self.out_channels, 3, stride=stride, padding=padding
@@ -451,9 +454,9 @@ class UNetModel(nn.Module):
         dropout=0,
         channel_mult=(1, 2, 4, 8),
         conv_resample=True,
-        dims=2,
+        dims=3,
         num_classes=None,
-        use_checkpoint=False,
+        use_checkpoint=True,
         use_fp16=False,
         num_heads=-1,
         num_head_channels=-1,
@@ -892,7 +895,7 @@ class EncoderUNetModel(nn.Module):
             self.out = nn.Sequential(
                 normalization(ch),
                 nn.SiLU(),
-                nn.AdaptiveAvgPool2d((1, 1)),
+                nn.AdaptiveAvgPool2d((1, 1)) if dims == 2 else nn.AdaptiveAvgPool3d((1, 1, 1)),
                 zero_module(conv_nd(dims, ch, out_channels, 1)),
                 nn.Flatten(),
             )
@@ -901,7 +904,7 @@ class EncoderUNetModel(nn.Module):
             self.out = nn.Sequential(
                 normalization(ch),
                 nn.SiLU(),
-                AttentionPool2d(
+                AttentionPool(
                     (image_size // ds), ch, num_head_channels, out_channels
                 ),
             )
