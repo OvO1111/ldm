@@ -1,4 +1,5 @@
-import os, os.path as path, yaml, pathlib as pb
+import os, sys
+sys.path.append("/mnt/workspace/dailinrui/code/latentdiffusion")
 import json, torchio as tio, torchvision as tv, shutil, nibabel as nib
 import re, SimpleITK as sitk, scipy.ndimage as ndimage, numpy as np, multiprocessing as mp
 
@@ -7,6 +8,9 @@ from functools import reduce, partial
 from torch.utils.data import Dataset
 
 from ldm.data.utils import conserve_only_certain_labels, window_norm, load_or_write_split, TorchioForegroundCropper
+
+
+def identity(x, *a, **b): return x
 
 
 class AutoencoderDataset(Dataset):
@@ -21,7 +25,7 @@ class AutoencoderDataset(Dataset):
         self.base_folder = "/mnt/data/oss_beijing/dailinrui/data/ruijin"
         self.load_fn = lambda x: sitk.GetArrayFromImage(sitk.ReadImage(x))
         self.transforms = dict(
-            resize=tio.Resize(resize_to),
+            resize=tio.Resize(resize_to) if resize_to is not None else tio.Lambda(identity),
             crop=TorchioForegroundCropper(crop_level="image_foreground", crop_kwargs=dict(foreground_hu_lb=0, outline=(0, 0, 0))),
             normalize_image=tio.Lambda(window_norm, include=["image"]),
             normalize_mask=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(0, 11), include=["mask"])
@@ -35,7 +39,8 @@ class AutoencoderDataset(Dataset):
 
         self.train_keys, self.val_keys, self.test_keys = load_or_write_split("/mnt/data/smart_health_02/dailinrui/data/pretrained/ldm/contrastive_exp_split/splits.json",
                                                                              force_rewrite_split,
-                                                                             self.train_keys, self.val_keys, self.test_keys)
+                                                                             train=self.train_keys, 
+                                                                             val=self.val_keys, test=self.test_keys)
         self.split_keys = getattr(self, f"{split}_keys")
 
     def __len__(self):
@@ -58,11 +63,15 @@ class AutoencoderDataset(Dataset):
         # resize
         subject = self.transforms["resize"](subject)
         # random aug
-        subject = self.transforms.get("augmentation", tio.Lambda(lambda x: x))(subject)
+        subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
         subject = {k: v.data for k, v in subject.items()}
 
         return subject
 
 
 if __name__ == "__main__":
-    c = AutoencoderDataset()
+    ds = AutoencoderDataset()
+    test_case = ds[0]
+    print(test_case["text"])
+    sitk.WriteImage(sitk.GetImageFromArray(test_case["image"]), "./test_proc_im.nii.gz")
+    sitk.WriteImage(sitk.GetImageFromArray(test_case["mask"]), "./test_proc_mask.nii.gz")
