@@ -314,8 +314,9 @@ class AutoencoderKL(pl.LightningModule):
                  ):
         super().__init__()
         self.image_key = image_key
-        self.encoder = Encoder(**ddconfig)
-        self.decoder = Decoder(**ddconfig)
+        self.encoder = Encoder(**ddconfig, dims=dims)
+        self.decoder = Decoder(**ddconfig, dims=dims)
+        lossconfig["params"]["dims"] = dims
         self.loss = instantiate_from_config(lossconfig)
         assert ddconfig["double_z"]
         self.dims = dims
@@ -374,12 +375,12 @@ class AutoencoderKL(pl.LightningModule):
         x = batch[k]
         if self.dims == 2:
             if len(x.shape) == 3:
-                x = x[..., None]
-            x = x.permute(0, 3, 1, 2).to(memory_format=torch.contiguous_format).float()
+                x = x[:, None]
+            x = x.to(memory_format=torch.contiguous_format).float()
         elif self.dims == 3:
             if len(x.shape) == 4:
-                x = x[..., None]
-            x = x.permute(0, 4, 1, 2, 3).to(memory_format=torch.contiguous_format).float()
+                x = x[:, None]
+            x = x.to(memory_format=torch.contiguous_format).float()
         return x
 
     def training_step(self, batch, batch_idx, optimizer_idx):

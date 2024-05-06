@@ -1,0 +1,24 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "debug autoencoder",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./main.py",
+            "args": ["-b", "./configs/autoencoder/ruijin_3d-autoencoder-kl.yaml", "-t", "--gpus", "0,", "--name", "test"],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "debug latentdiffusion",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./main.py",
+            "args": ["-b", "./configs/latent-diffusion/ruijin_3d-ldm.yaml", "-t", "--gpus", "0,", "--name", "test"],
+            "console": "integratedTerminal"
+        },
+    ]
+}

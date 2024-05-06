@@ -7,7 +7,7 @@ import pytorch_lightning as pl
 
 from packaging import version
 from omegaconf import OmegaConf
-from torch.utils.data import random_split, DataLoader, Dataset, Subset
+from torch.utils.data import random_split, DataLoader, Dataset, Subset, _utils
 from functools import partial
 from PIL import Image
 from queue import Queue

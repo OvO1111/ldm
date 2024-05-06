@@ -13,10 +13,14 @@ from collections import OrderedDict, defaultdict
 
 
 def conserve_only_certain_labels(label, designated_labels=[1, 2, 3, 5, 6, 10, 55, 56, 57, 104]):
-    # 6: stomach, 57: colon
-    if designated_labels is None:
-        return label.astype(np.uint8)
-    label_ = np.zeros_like(label)
+    if isinstance(label, np.ndarray):
+        if designated_labels is None:
+            return label.astype(np.uint8)
+        label_ = np.zeros_like(label)
+    elif isinstance(label, torch.Tensor):
+        if designated_labels is None:
+            return label.long()
+        label_ = torch.zeros_like(label)
     for il, l in enumerate(designated_labels):
         label_[label == l] = il + 1
     return label_
@@ -127,25 +131,25 @@ class TorchioForegroundCropper(tio.transforms.Transform):
         if isinstance(outline, int): outline = [outline] * 6
         if len(outline) == 3: outline = reduce(lambda x, y: x + y, zip(outline, outline))
         if self.crop_level == "image_foreground":
-            image_ = subject_["image"][0]
-            s1, e1 = torch.where(torch.any(image_ >= self.crop_kwargs.get('foreground_hu_lb', 0), dim=(2, 3)))[[0, -1]]
-            s2, e2 = torch.where(torch.any(image_ >= self.crop_kwargs.get('foreground_hu_lb', 0), dim=(1, 3)))[[0, -1]]
-            s3, e3 = torch.where(torch.any(image_ >= self.crop_kwargs.get('foreground_hu_lb', 0), dim=(1, 2)))[[0, -1]]
+            image_ = subject_["image"]
+            s1, e1 = torch.where((image_ >= self.crop_kwargs.get('foreground_hu_lb', 0)).any(-1).any(-1).any(0))[0][[0, -1]]
+            s2, e2 = torch.where((image_ >= self.crop_kwargs.get('foreground_hu_lb', 0)).any(1).any(-1).any(0))[0][[0, -1]]
+            s3, e3 = torch.where((image_ >= self.crop_kwargs.get('foreground_hu_lb', 0)).any(1).any(1).any(0))[0][[0, -1]]
             cropper = [slice(max(0, s1 - outline[0]), min(e1 + 1 + outline[1], image_.shape[1])),
                        slice(max(0, s2 - outline[2]), min(e2 + 1 + outline[3], image_.shape[2])),
                        slice(max(0, s3 - outline[4]), min(e3 + 1 + outline[5], image_.shape[3]))]
-            subject_ = {k: tio.Image(tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in data.items()}
+            subject_ = {k: tio.Image(tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
         
         assert "mask" in subject_
         if self.crop_level == "mask_foreground":
             mask_ = conserve_only_certain_labels(subject_["mask"], self.crop_kwargs.get("foreground_mask_label", None))
-            s1, e1 = torch.where(torch.any(mask_, dim=(2, 3)))[[0, -1]]
-            s2, e2 = torch.where(torch.any(mask_, dim=(1, 3)))[[0, -1]]
-            s3, e3 = torch.where(torch.any(mask_, dim=(1, 2)))[[0, -1]]
+            s1, e1 = torch.where(mask_.any(-1).any(-1).any(0))[0][[0, -1]]
+            s2, e2 = torch.where(mask_.any(1).any(-1).any(0))[0][[0, -1]]
+            s3, e3 = torch.where(mask_.any(1).any(1).any(0))[0][[0, -1]]
             cropper = [slice(max(0, s1 - outline[0]), min(e1 + 1 + outline[1], mask_.shape[1])),
                        slice(max(0, s2 - outline[2]), min(e2 + 1 + outline[3], mask_.shape[2])),
                        slice(max(0, s3 - outline[4]), min(e3 + 1 + outline[5], mask_.shape[3]))]
-            subject_ = {k: tio.Image(tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in data.items()}
+            subject_ = {k: tio.Image(tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
             
         return tio.Subject(subject_)
             

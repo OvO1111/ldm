@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 4.5e-7
+  base_learning_rate: 4.5e-6
   target: ldm.models.autoencoder.AutoencoderKL
   params:
     monitor: "val/rec_loss"
@@ -14,20 +14,19 @@ model:
         disc_weight: 0.5
         disc_in_channels: 1
         gan_feat_weight: 0
-        dims: 3
 
     ddconfig:
       double_z: True
       z_channels: 4
-      resolution: 256
+      resolution: [64, 128, 128]
       in_channels: 1 # should be 1, but now it is 3, broadcast along channel dim
       out_ch: 1
-      ch: 32
-      ch_mult: [ 1,2,4,4]  # num_down = len(ch_mult)-1
+      ch: 64
+      ch_mult: [1,2,4,4]  # num_down = len(ch_mult)-1
       num_res_blocks: 2
       dropout: 0.0
-      dims: 3
-      attn_resolutions: [32, 16, 8]
+      attn_resolutions: [8,]  # on z axis, starting with 8->16->32 for len(ch_mult)==4 and resolution==64
+      attn_type: vanilla
 
 data:
   target: main.DataModuleFromConfig
@@ -49,7 +48,7 @@ lightning:
     image_logger:
       target: main.ImageLogger
       params:
-        batch_frequency: 1000
+        batch_frequency: 4
         max_images: 8
         increase_log_steps: True
 

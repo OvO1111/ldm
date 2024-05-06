@@ -129,23 +129,34 @@ class CheckpointFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *output_grads):
-        ctx.input_tensors = [x.detach().requires_grad_(True) for x in ctx.input_tensors]
+        ctx.input_tensors = [x.detach().requires_grad_(True) if torch.is_tensor(x) else x for x in ctx.input_tensors]
         with torch.enable_grad():
             # Fixes a bug where the first op in run_function modifies the
             # Tensor storage in place, which is not allowed for detach()'d
             # Tensors.
-            shallow_copies = [x.view_as(x) for x in ctx.input_tensors]
+            shallow_copies = [x.view_as(x) if torch.is_tensor(x) else x for x in ctx.input_tensors]
             output_tensors = ctx.run_function(*shallow_copies)
+        input_tensors_without_none = [x for x in ctx.input_tensors if torch.is_tensor(x)]
+        input_tensors_indices = [ix for ix, x in enumerate(ctx.input_tensors) if not torch.is_tensor(x)]
         input_grads = torch.autograd.grad(
             output_tensors,
-            ctx.input_tensors + ctx.input_params,
+            input_tensors_without_none + ctx.input_params,
             output_grads,
             allow_unused=True,
         )
+        output_grads = [None] * (len(ctx.input_tensors) + len(ctx.input_params))
+        ii = 0
+        for ix in range(len(ctx.input_tensors) + len(ctx.input_params)):
+            if ix not in input_tensors_indices:
+                output_grads[ix] = input_grads[ii]
+                ii += 1
+            else: output_grads[ix] = None
+
+        output_grads = tuple(output_grads)
         del ctx.input_tensors
         del ctx.input_params
         del output_tensors
-        return (None, None) + input_grads
+        return (None, None) + output_grads
 
 
 def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
