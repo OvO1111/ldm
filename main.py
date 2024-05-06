@@ -248,7 +248,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
             init_fn = None
         return DataLoader(self.datasets["train"], batch_size=self.batch_size,
                           num_workers=self.num_workers, shuffle=False if is_iterable_dataset else True,
-                          worker_init_fn=init_fn, collate_fn=self.datasets["train"].collate)
+                          worker_init_fn=init_fn, collate_fn=getattr(self.datasets["train"], "collate", _utils.collate.default_collate))
 
     def _val_dataloader(self, shuffle=False, batch_size=None):
         if isinstance(self.datasets['validation'], Txt2ImgIterableBaseDataset) or self.use_worker_init_fn:
@@ -259,7 +259,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
                           batch_size=self.batch_size if batch_size is None else batch_size,
                           num_workers=self.num_workers,
                           worker_init_fn=init_fn,
-                          shuffle=shuffle, collate_fn=self.datasets["validation"].collate)
+                          shuffle=shuffle, collate_fn=getattr(self.datasets["validation"], "collate", _utils.collate.default_collate))
 
     def _test_dataloader(self, shuffle=False):
         is_iterable_dataset = isinstance(self.datasets['train'], Txt2ImgIterableBaseDataset)
@@ -354,8 +354,9 @@ class ImageLogger(Callback):
         self.log_images_kwargs = log_images_kwargs if log_images_kwargs else {}
         self.log_first_step = log_first_step
         self.keep_queue = Queue(save_num)
-        self.rescale_fn = lambda x: (x + 1) / 2. if rescale_fn is None else \
-            lambda x: torch.clamp(x*20, 0, 1) if rescale_fn == "clamp" else None
+        if rescale_fn == "minmax": self.rescale_fn = lambda x: (x - x.min()) / (x.max() - x.min())
+        elif rescale_fn == "clamp": self.rescale_fn = lambda x: torch.clamp(x * 20, 0, 1)
+        elif rescale_fn == "default": self.rescale_fn = lambda x: (x + 1) / 2.
 
     @rank_zero_only
     def _testtube(self, pl_module, images, batch_idx, split):
@@ -388,7 +389,6 @@ class ImageLogger(Callback):
     def log_local(self, save_dir, split, images,
                   global_step, current_epoch, batch_idx):
         root = os.path.join(save_dir, "images", split)
-        random = np.random.randint(images[list(images.keys())[0]].shape[2])
         for k in images:
             _im = images[k].contiguous()
             if len(_im.shape) == 5: _im = rearrange(_im, "b c d w h -> (b d) c w h")
@@ -397,8 +397,8 @@ class ImageLogger(Callback):
             if k == "conditioning":
                 if _im.shape[1] == 2:
                     grid = torchvision.utils.make_grid(combine_mask_and_im(_im))
-            # if self.rescale:
-            #     grid = self.rescale_fn(grid)  # -1,1 -> 0,1; c,h,w
+            if self.rescale:
+                grid = self.rescale_fn(grid)  # -1,1 -> 0,1; c,h,w
             grid = grid.transpose(0, 1).transpose(1, 2).squeeze(-1)
             grid = grid.numpy()
             if grid.min() >= 0 and grid.max() <= 1:
@@ -411,7 +411,8 @@ class ImageLogger(Callback):
                 current_epoch,
                 batch_idx)
             path = os.path.join(root, k, filename)
-            # os.makedirs(os.path.split(path)[0], exist_ok=True)
+            if not os.path.exists(os.path.split(path)[0]):
+                os.makedirs(os.path.split(path)[0], exist_ok=True)
             self._maybe_mkdir(os.path.split(path)[0])
             Image.fromarray(grid).save(path)
             self._enqueue_and_dequeue(path)

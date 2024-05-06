@@ -40,11 +40,10 @@ model:
         - 4
         - 5
         num_head_channels: 32
-    first_stage_config: __is_no_first_stage__
+    first_stage_config: 
+      target: torch.nn.Identity
     cond_stage_config: 
       target: ldm.modules.encoders.modules.FrozenBERTEmbedder
-      # params:
-      #   ckpt_path: /mnt/data/oss_beijing/dailinrui/data/pretrained_weights/bert-ernie-health
 
 data:
   target: main.DataModuleFromConfig
