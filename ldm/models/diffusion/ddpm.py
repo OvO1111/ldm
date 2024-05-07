@@ -1250,7 +1250,7 @@ class LatentDiffusion(DDPM):
 
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=4, sample=True, ddim_steps=200, ddim_eta=1., return_keys=None,
-                   quantize_denoised=True, inpaint=True, plot_denoise_rows=False, plot_progressive_rows=False,
+                   quantize_denoised=True, inpaint=False, plot_denoise_rows=False, plot_progressive_rows=False,
                    plot_diffusion_rows=False, **kwargs):
 
         use_ddim = ddim_steps is not None
