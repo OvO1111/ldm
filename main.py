@@ -337,7 +337,7 @@ class SetupCallback(Callback):
 class ImageLogger(Callback):
     def __init__(self, batch_frequency, max_images, clamp=True, increase_log_steps=True,
                  rescale=True, disabled=False, log_on_batch_idx=False, log_first_step=False,
-                 log_images_kwargs=None, save_num=30, rescale_fn=None):
+                 log_images_kwargs=None, save_num=30, rescale_fn=None, logger=None):
         super().__init__()
         self.rescale = rescale
         self.batch_freq = batch_frequency
@@ -354,9 +354,16 @@ class ImageLogger(Callback):
         self.log_images_kwargs = log_images_kwargs if log_images_kwargs else {}
         self.log_first_step = log_first_step
         self.keep_queue = Queue(save_num)
-        if rescale_fn == "minmax": self.rescale_fn = lambda x: (x - x.min()) / (x.max() - x.min())
-        elif rescale_fn == "clamp": self.rescale_fn = lambda x: torch.clamp(x * 20, 0, 1)
-        elif rescale_fn == "default": self.rescale_fn = lambda x: (x + 1) / 2.
+        
+        def _get_logger(target, params):
+            if target == "mask_rescale":
+                return lambda x: x * params.get("n_mask")
+            if target == "image_rescale":
+                return lambda x: x
+        
+        self.logger = {}
+        for name, val in logger.items():
+            self.logger[name] = _get_logger(val["target"], val.get("params"))
 
     @rank_zero_only
     def _testtube(self, pl_module, images, batch_idx, split):
@@ -394,12 +401,13 @@ class ImageLogger(Callback):
             if len(_im.shape) == 5: _im = rearrange(_im, "b c d w h -> (b d) c w h")
             grid = torchvision.utils.make_grid(rearrange(_im, "b c h w -> (b c) 1 h w"))
             ### force rescale conditioning:
-            if k == "conditioning":
-                if _im.shape[1] == 2:
-                    grid = torchvision.utils.make_grid(combine_mask_and_im(_im))
-            if self.rescale:
-                grid = self.rescale_fn(grid)  # -1,1 -> 0,1; c,h,w
-            grid = grid.transpose(0, 1).transpose(1, 2).squeeze(-1)
+            # if k == "conditioning":
+            #     if _im.shape[1] == 2:
+            #         grid = torchvision.utils.make_grid(combine_mask_and_im(_im))
+            # if self.rescale:
+            #     grid = self.rescale_fn(grid)  # -1,1 -> 0,1; c,h,w
+            grid = self.logger.get(k, lambda x: x)(grid)
+            grid = rearrange(grid, "c h w -> h w c")
             grid = grid.numpy()
             if grid.min() >= 0 and grid.max() <= 1:
                 grid = (grid * 255).astype(np.uint8)

@@ -316,7 +316,8 @@ class AutoencoderKL(pl.LightningModule):
         self.image_key = image_key
         self.encoder = Encoder(**ddconfig, dims=dims)
         self.decoder = Decoder(**ddconfig, dims=dims)
-        lossconfig["params"]["dims"] = dims
+        if "params" in lossconfig:
+            lossconfig["params"]["dims"] = dims
         self.loss = instantiate_from_config(lossconfig)
         assert ddconfig["double_z"]
         self.dims = dims
