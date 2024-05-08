@@ -2,6 +2,7 @@ import argparse, os, sys, datetime, glob, importlib, csv, re
 import numpy as np
 import time
 import torch
+import wandb
 import torchvision
 import pytorch_lightning as pl
 
@@ -15,6 +16,7 @@ from queue import Queue
 from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
+from pytorch_lightning.loggers import WandbLogger, TestTubeLogger
 from pytorch_lightning.utilities.distributed import rank_zero_only
 from pytorch_lightning.utilities import rank_zero_info
 
@@ -343,7 +345,8 @@ class ImageLogger(Callback):
         self.batch_freq = batch_frequency
         self.max_images = max_images
         self.logger_log_images = {
-            pl.loggers.TestTubeLogger: self._testtube,
+            TestTubeLogger: self._testtube,
+            WandbLogger: self._wandb
         }
         self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
         if not increase_log_steps:
@@ -380,6 +383,12 @@ class ImageLogger(Callback):
                 tag, grid,
                 global_step=pl_module.global_step)
             
+    @rank_zero_only
+    def _wandb(self, pl_module, images, batch_idx, split):
+        for k in images:
+            _im = images[k]
+            pl_module.logger.experiment.log({f"{split}_{k}": [wandb.Image(_im)]})
+            
     @staticmethod
     def _maybe_mkdir(path):
         if not os.path.exists(path):
@@ -396,9 +405,12 @@ class ImageLogger(Callback):
     def log_local(self, save_dir, split, images,
                   global_step, current_epoch, batch_idx):
         root = os.path.join(save_dir, "images", split)
+        local_images = {}
         for k in images:
             _im = images[k].contiguous()
-            if len(_im.shape) == 5: _im = rearrange(_im, "b c d w h -> (b d) c w h")
+            if len(_im.shape) == 5: 
+                step = max(_im.shape[2] // 10, 1)  # at most save 10 slices
+                _im = rearrange(_im[:, 0:1, ::step], "b c d w h -> (b d) c w h")
             grid = torchvision.utils.make_grid(rearrange(_im, "b c h w -> (b c) 1 h w"))
             ### force rescale conditioning:
             # if k == "conditioning":
@@ -422,8 +434,11 @@ class ImageLogger(Callback):
             if not os.path.exists(os.path.split(path)[0]):
                 os.makedirs(os.path.split(path)[0], exist_ok=True)
             self._maybe_mkdir(os.path.split(path)[0])
-            Image.fromarray(grid).save(path)
+            im = Image.fromarray(grid)
+            local_images[k] = im
+            im.save(path)
             self._enqueue_and_dequeue(path)
+        return local_images
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):
         check_idx = batch_idx if self.log_on_batch_idx else pl_module.global_step
@@ -448,11 +463,11 @@ class ImageLogger(Callback):
                     if self.clamp:
                         images[k] = torch.clamp(images[k], -1., 1.)
 
-            self.log_local(pl_module.logger.save_dir, split, images,
-                           pl_module.global_step, pl_module.current_epoch, batch_idx)
+            local_images = self.log_local(pl_module.logger.save_dir, split, images,
+                                          pl_module.global_step, pl_module.current_epoch, batch_idx)
 
             logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
-            logger_log_images(pl_module, images, pl_module.global_step, split)
+            logger_log_images(pl_module, local_images, pl_module.global_step, split)
 
             if is_train:
                 pl_module.train()
@@ -650,7 +665,7 @@ if __name__ == "__main__":
                 }
             },
         }
-        default_logger_cfg = default_logger_cfgs["testtube"]
+        default_logger_cfg = default_logger_cfgs["wandb"]
         if "logger" in lightning_config:
             logger_cfg = lightning_config.logger
         else:
