@@ -50,7 +50,7 @@ class LPIPSWithDiscriminator(nn.Module):
     def __init__(self, disc_start, logvar_init=1.0, kl_weight=1.0, pixelloss_weight=1.0,
                  disc_num_layers=3, disc_in_channels=3, disc_factor=1.0, disc_weight=1.0,
                  perceptual_weight=1.0, use_actnorm=False, disc_conditional=False,
-                 disc_loss="hinge", pixel_loss="l1", image_gan_weight=0.5, ct_gan_weight=0.5, gan_feat_weight=1.0, dims=2):
+                 disc_loss="hinge", pixel_loss="l1", image_gan_weight=0, ct_gan_weight=1, gan_feat_weight=0.0, dims=2):
 
         super().__init__()
         assert disc_loss in ["hinge", "vanilla"]
@@ -194,14 +194,14 @@ class LPIPSWithDiscriminator(nn.Module):
         else:
             p_loss = torch.tensor([0.])
 
-        nll_loss = rec_loss #/ torch.exp(self.logvar) + self.logvar
-        """weighted_nll_loss = nll_loss
+        nll_loss = rec_loss / torch.exp(self.logvar) + self.logvar
+        weighted_nll_loss = nll_loss
         if weights is not None:
             weighted_nll_loss = weights*nll_loss
         weighted_nll_loss = torch.sum(weighted_nll_loss) / weighted_nll_loss.shape[0]
-        nll_loss = torch.sum(nll_loss) / nll_loss.shape[0]"""
-        nll_loss = torch.mean(nll_loss)
-        weighted_nll_loss = nll_loss
+        nll_loss = torch.sum(nll_loss) / nll_loss.shape[0]
+        # nll_loss = torch.mean(nll_loss)
+        # weighted_nll_loss = nll_loss
         kl_loss = posteriors.kl()
         kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
 
@@ -220,8 +220,10 @@ class LPIPSWithDiscriminator(nn.Module):
                     logits_fake_image, pred_fake_image = self.frame_discriminator(torch.cat((frames_rec.contiguous(), frame_cond), dim=1))
                 if self.ct_gan_weight > 0:
                     logits_fake_ct, pred_fake_ct = self.ct_discriminator(torch.cat((reconstructions.contiguous(), cond), dim=1))
-            g_loss = -(torch.mean(logits_fake_image) + torch.mean(logits_fake_ct)) / 2
-
+            if self.image_gan_weight > 0 and self.ct_gan_weight > 0: g_loss = -(torch.mean(logits_fake_image) + torch.mean(logits_fake_ct)) / 2
+            elif self.image_gan_weight > 0: g_loss = -torch.mean(logits_fake_image)
+            elif self.ct_gan_weight > 0: g_loss = -torch.mean(logits_fake_ct)
+            
             if self.disc_factor > 0.0:
                 try:
                     d_weight = self.calculate_adaptive_weight(nll_loss, g_loss, last_layer=last_layer)
@@ -282,14 +284,18 @@ class LPIPSWithDiscriminator(nn.Module):
                     logits_ct_fake, _ = self.ct_discriminator(torch.cat((reconstructions.contiguous().detach(), frame_cond), dim=1))
 
             disc_factor = adopt_weight(self.disc_factor, global_step, threshold=self.discriminator_iter_start)
-            d_loss = disc_factor * (self.disc_loss(logits_frame_real, logits_frame_fake) + self.disc_loss(logits_ct_real, logits_ct_fake)) / 2
+            if self.image_gan_weight > 0 and self.ct_gan_weight > 0: d_loss = disc_factor * (self.disc_loss(logits_frame_real, logits_frame_fake) + self.disc_loss(logits_ct_real, logits_ct_fake)) / 2
+            elif self.image_gan_weight > 0: d_loss = disc_factor * self.disc_loss(logits_frame_real, logits_frame_fake)
+            elif self.ct_gan_weight > 0: d_loss = disc_factor * self.disc_loss(logits_ct_real, logits_ct_fake)
 
             log = {"{}/disc_loss".format(split): d_loss.clone().detach().mean(),
-                   "{}/logits_frames_real".format(split): logits_frame_real.detach().mean(),
-                   "{}/logits_frames_fake".format(split): logits_frame_fake.detach().mean(),
-                   "{}/logits_ct_real".format(split): logits_ct_real.detach().mean(),
-                   "{}/logits_ct_fake".format(split): logits_ct_fake.detach().mean(),
                    }
+            if self.image_gan_weight > 0:
+                log.update({"{}/logits_frames_real".format(split): logits_frame_real.detach().mean(),
+                            "{}/logits_frames_fake".format(split): logits_frame_fake.detach().mean(),})
+            if self.ct_gan_weight > 0:
+                log.update({"{}/logits_ct_real".format(split): logits_ct_real.detach().mean(),
+                            "{}/logits_ct_fake".format(split): logits_ct_fake.detach().mean(),})
             return d_loss, log
 
 

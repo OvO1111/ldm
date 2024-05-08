@@ -84,7 +84,7 @@ def get_parser(**parser_kwargs):
         "--name",
         type=str,
         const=True,
-        default="",
+        default="test",
         nargs="?",
         help="postfix for logdir",
     )

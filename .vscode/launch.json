@@ -9,7 +9,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/autoencoder/ruijin_3d-autoencoder-kl.yaml", "-t", "--gpus", "0,", "--name", "test"],
+            "args": ["-b", "./configs/autoencoder/brats2021_3d_ae_kl.yaml", "-t", "--gpus", "0,", "--name", "abc"],
             "console": "integratedTerminal"
         },
         {
@@ -18,6 +18,14 @@
             "request": "launch",
             "program": "./main.py",
             "args": ["-b", "./configs/latent-diffusion/ruijin_3d-ldm.yaml", "-t", "--gpus", "0,", "--name", "test"],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "debug current file",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "args": [],
             "console": "integratedTerminal"
         },
     ]

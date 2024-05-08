@@ -12,6 +12,9 @@ from functools import reduce, partial
 from collections import OrderedDict, defaultdict
 
 
+def identity(x, *a, **b): return x
+
+
 def conserve_only_certain_labels(label, designated_labels=[1, 2, 3, 5, 6, 10, 55, 56, 57, 104]):
     if isinstance(label, np.ndarray):
         if designated_labels is None:
@@ -127,6 +130,24 @@ class TorchioForegroundCropper(tio.transforms.Transform):
             return data
 
         assert "image" in subject_
+        if self.crop_level == "patch":
+            image_ = subject_["image"]
+            output_size = self.crop_kwargs["output_size"]
+            
+            pw = max((output_size[0] - image_.shape[1]) // 2 + 3, 0)
+            ph = max((output_size[1] - image_.shape[2]) // 2 + 3, 0)
+            pd = max((output_size[2] - image_.shape[3]) // 2 + 3, 0)
+            image_ = torch.nn.functional.pad(image_, (pw, pw, ph, ph, pd, pd), mode='constant', value=0)
+
+            (c, w, h, d) = image_.shape
+            w1 = np.random.randint(0, w - output_size[0])
+            h1 = np.random.randint(0, h - output_size[1])
+            d1 = np.random.randint(0, d - output_size[2])
+            
+            padder = identity if pw + ph + pd == 0 else lambda x: torch.nn.functional.pad(x, (pw, pw, ph, ph, pd, pd), mode='constant', value=0)
+            cropper = [slice(w1, w1 + output_size[0]), slice(h1, h1 + output_size[1]), slice(d1, d1 + output_size[2])]
+            subject_ = {k: tio.Image(tensor=padder(v)[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
+            
         outline = self.crop_kwargs.get("outline", [0] * 6)
         if isinstance(outline, int): outline = [outline] * 6
         if len(outline) == 3: outline = reduce(lambda x, y: x + y, zip(outline, outline))

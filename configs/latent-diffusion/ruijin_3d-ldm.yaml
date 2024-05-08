@@ -82,11 +82,11 @@ data:
     num_workers: 5
     wrap: false
     train:
-      target: ldm.data.ruijin_3d.AutoencoderDataset
+      target: ldm.data.ruijin.Ruijin_3D
       params:
         split: train
     validation:
-      target: ldm.data.ruijin_3d.AutoencoderDataset
+      target: ldm.data.ruijin.Ruijin_3D
       params:
         split: val
 
@@ -97,7 +97,7 @@ lightning:
       target: main.ImageLogger
       params:
         batch_frequency: 4000
-        max_images: 8
+        max_images: 4
         increase_log_steps: False
         logger:
           inputs: 

@@ -36,11 +36,11 @@ data:
     num_workers: 8
     wrap: False
     train:
-      target: ldm.data.ruijin_3d.AutoencoderDataset
+      target: ldm.data.ruijin.Ruijin_3D
       params:
         split: train
     validation:
-      target: ldm.data.ruijin_3d.AutoencoderDataset
+      target: ldm.data.ruijin.Ruijin_3D
       params:
         split: val
 
