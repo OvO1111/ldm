@@ -363,7 +363,7 @@ class ImageLogger(Callback):
             if target == "mask_rescale":
                 return lambda x: x * params.get("n_mask")
             if target == "image_rescale":
-                return lambda x: x
+                return lambda x: (x - x.min()) / (x.max() - x.min())
         
         self.logger = {}
         for name, val in logger.items():
@@ -421,11 +421,7 @@ class ImageLogger(Callback):
             #     grid = self.rescale_fn(grid)  # -1,1 -> 0,1; c,h,w
             grid = self.logger.get(k, lambda x: x)(grid)
             grid = rearrange(grid, "c h w -> h w c")
-            grid = grid.numpy()
-            if grid.min() >= 0 and grid.max() <= 1:
-                grid = (grid * 255).astype(np.uint8)
-            else:
-                grid = ((grid - grid.min()) / (grid.max() - grid.min()) * 255).astype(np.uint8)
+            grid = (grid.numpy() * 255).astype(np.uint8)
             filename = "{}_gs-{:06}_e-{:06}_b-{:06}.png".format(
                 k,
                 global_step,
