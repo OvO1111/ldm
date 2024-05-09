@@ -52,8 +52,8 @@ class BraTS2021_3D(Dataset):
         new = pathlib.Path("/mnt/lustrenew/hukeyi/lwh/dlr/dataset/brats2021/data")
         for case in tqdm(list((base).iterdir())):
             mods = list(case.iterdir())
-            images = sorted([m for m in mods if "seg" not in m])
-            segs = [m for m in mods if "seg" in m]
+            images = sorted([m for m in mods if "seg" not in m.name])
+            segs = [m for m in mods if "seg" in m.name]
             opened_images = [sitk.GetArrayFromImage(sitk.ReadImage(x))[None] for x in images]
             opened_segs = [sitk.GetArrayFromImage(sitk.ReadImage(x))[None] for x in segs]
             opened_images = np.concatenate(opened_images, axis=0)
