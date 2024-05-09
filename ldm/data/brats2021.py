@@ -59,9 +59,9 @@ class BraTS2021_3D(Dataset):
             opened_images = np.concatenate(opened_images, axis=0)
             opened_segs = np.concatenate(opened_segs, axis=0)
             
-            file = h5py.File(new / (case.name + ".h5"), "w", use_compression="gzip")
-            file.create_dataset("image", data=opened_images)
-            file.create_dataset("label", data=opened_segs)
+            file = h5py.File(new / (case.name + ".h5"), "w")
+            file.create_dataset("image", data=opened_images, compression="gzip")
+            file.create_dataset("label", data=opened_segs, compression="gzip")
             file.close()
 
 
