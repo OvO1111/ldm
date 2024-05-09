@@ -32,7 +32,7 @@ class BraTS2021_3D(Dataset):
         item = self.load_fn(self.split_keys[idx])
         image, mask = map(lambda x: item[x][:], ["image", "label"])
         
-        subject = tio.Subject(image=tio.ScalarImage(tensor=image), mask=tio.ScalarImage(tensor=mask[None]),)
+        subject = tio.Subject(image=tio.ScalarImage(tensor=image), mask=tio.ScalarImage(tensor=mask),)
         # crop
         subject = self.transforms["crop"](subject)
         # normalize
@@ -43,6 +43,26 @@ class BraTS2021_3D(Dataset):
         subject = {k: v.data for k, v in subject.items()}
 
         return subject
+    
+    @staticmethod
+    def process():
+        import pathlib, SimpleITK as sitk
+        from tqdm import tqdm
+        base = pathlib.Path("/mnt/lustrenew/hukeyi/lwh/Data/BraTS2021_Training_Data")
+        new = pathlib.Path("/mnt/lustrenew/hukeyi/lwh/dlr/dataset/brats2021/data")
+        for case in tqdm(list((base).iterdir())):
+            mods = list(case.iterdir())
+            images = sorted([m for m in mods if "seg" not in m])
+            segs = [m for m in mods if "seg" in m]
+            opened_images = [sitk.GetArrayFromImage(sitk.ReadImage(x))[None] for x in images]
+            opened_segs = [sitk.GetArrayFromImage(sitk.ReadImage(x))[None] for x in segs]
+            opened_images = np.concatenate(opened_images, axis=0)
+            opened_segs = np.concatenate(opened_segs, axis=0)
+            
+            file = h5py.File(new / case.name + ".h5", "w", use_compression="gzip")
+            file.create_dataset("image", data=opened_images)
+            file.create_dataset("label", data=opened_segs)
+            file.close()
 
 
 if __name__ == "__main__":
