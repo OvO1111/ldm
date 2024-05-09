@@ -16,7 +16,7 @@ from queue import Queue
 from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
-from pytorch_lightning.loggers import WandbLogger, TestTubeLogger
+from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities.distributed import rank_zero_only
 from pytorch_lightning.utilities import rank_zero_info
 
@@ -345,7 +345,6 @@ class ImageLogger(Callback):
         self.batch_freq = batch_frequency
         self.max_images = max_images
         self.logger_log_images = {
-            TestTubeLogger: self._testtube,
             WandbLogger: self._wandb
         }
         self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
@@ -654,14 +653,6 @@ if __name__ == "__main__":
                     "save_dir": logdir,
                     "offline": opt.debug,
                     "id": nowname,
-                }
-            },
-            "testtube": {
-                "target": "pytorch_lightning.loggers.TestTubeLogger",
-                "params": {
-                    "name": "testtube",
-                    "save_dir": logdir,
-                    "version": 0
                 }
             },
         }
