@@ -66,10 +66,11 @@ class BraTS2021_3D(Dataset):
 
 
 if __name__ == "__main__":
-    import time
-    ds = BraTS2021_3D(crop_to=None)
-    st = time.time()
-    test_case = ds[0]
-    print(time.time() - st)
-    sitk.WriteImage(sitk.GetImageFromArray(test_case["image"][0].numpy()), "./test_proc_im.nii.gz")
-    sitk.WriteImage(sitk.GetImageFromArray((test_case["mask"][0] * 3).numpy().astype(np.uint8)), "./test_proc_mask.nii.gz")
+    # import time
+    # ds = BraTS2021_3D(crop_to=None)
+    # st = time.time()
+    # test_case = ds[0]
+    # print(time.time() - st)
+    # sitk.WriteImage(sitk.GetImageFromArray(test_case["image"][0].numpy()), "./test_proc_im.nii.gz")
+    # sitk.WriteImage(sitk.GetImageFromArray((test_case["mask"][0] * 3).numpy().astype(np.uint8)), "./test_proc_mask.nii.gz")
+    BraTS2021_3D().process()
