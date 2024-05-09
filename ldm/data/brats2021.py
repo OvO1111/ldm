@@ -22,8 +22,8 @@ class BraTS2021_3D(Dataset):
         )
 
         self.split = split
-        with open(f"/mnt/data/oss_beijing/dailinrui/data/dataset/BraTS2021/{split}.list") as fp:
-            self.split_keys = [os.path.join("/mnt/data/oss_beijing/dailinrui/data/dataset/BraTS2021/data", _.strip()) for _ in fp.readlines()]
+        with open(f"/mnt/lustrenew/hukeyi/lwh/dlr/dataset/brats2021/{split}.list") as fp:
+            self.split_keys = [os.path.join("/lustrenew/hukeyi/lwh/dlr/dataset/brats2021/data", _.strip()) for _ in fp.readlines()]
 
     def __len__(self):
         return len(self.split_keys)
@@ -66,11 +66,11 @@ class BraTS2021_3D(Dataset):
 
 
 if __name__ == "__main__":
-    # import time
-    # ds = BraTS2021_3D(crop_to=None)
-    # st = time.time()
-    # test_case = ds[0]
-    # print(time.time() - st)
-    # sitk.WriteImage(sitk.GetImageFromArray(test_case["image"][0].numpy()), "./test_proc_im.nii.gz")
-    # sitk.WriteImage(sitk.GetImageFromArray((test_case["mask"][0] * 3).numpy().astype(np.uint8)), "./test_proc_mask.nii.gz")
-    BraTS2021_3D().process()
+    import time
+    ds = BraTS2021_3D(crop_to=None)
+    st = time.time()
+    test_case = ds[0]
+    print(time.time() - st)
+    sitk.WriteImage(sitk.GetImageFromArray(test_case["image"][0].numpy()), "./test_proc_im.nii.gz")
+    sitk.WriteImage(sitk.GetImageFromArray((test_case["mask"][0] * 3).numpy().astype(np.uint8)), "./test_proc_mask.nii.gz")
+    # BraTS2021_3D().process()
