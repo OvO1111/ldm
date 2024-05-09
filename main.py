@@ -3,6 +3,7 @@ import numpy as np
 import time
 import torch
 import wandb
+import shutil
 import torchvision
 import pytorch_lightning as pl
 
@@ -329,7 +330,8 @@ class SetupCallback(Callback):
                 dst = os.path.join(dst, "child_runs", name)
                 os.makedirs(os.path.split(dst)[0], exist_ok=True)
                 try:
-                    os.rename(self.logdir, dst)
+                    shutil.copytree(self.logdir, dst)
+                    shutil.rmtree(self.logdir)
                 except FileNotFoundError:
                     pass
                 except FileExistsError:
@@ -610,9 +612,6 @@ if __name__ == "__main__":
 
     ckptdir = os.path.join(logdir, "checkpoints")
     cfgdir = os.path.join(logdir, "configs")
-    os.makedirs(ckptdir, exist_ok=True)
-    os.makedirs(cfgdir, exist_ok=True)
-    os.makedirs(os.path.join(logdir, "wandb"), exist_ok=True)
     seed_everything(opt.seed)
 
     try:
@@ -815,6 +814,11 @@ if __name__ == "__main__":
 
         signal.signal(signal.SIGUSR1, melk)
         signal.signal(signal.SIGUSR2, divein)
+        
+        # create necessary folders
+        os.makedirs(ckptdir, exist_ok=True)
+        os.makedirs(cfgdir, exist_ok=True)
+        os.makedirs(os.path.join(logdir, "wandb"), exist_ok=True)
 
         # run
         if opt.train:
