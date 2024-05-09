@@ -23,7 +23,7 @@ class BraTS2021_3D(Dataset):
 
         self.split = split
         with open(f"/mnt/lustrenew/hukeyi/lwh/dlr/dataset/brats2021/{split}.list") as fp:
-            self.split_keys = [os.path.join("/lustrenew/hukeyi/lwh/dlr/dataset/brats2021/data", _.strip()) for _ in fp.readlines()]
+            self.split_keys = [os.path.join("/mnt/lustrenew/hukeyi/lwh/dlr/dataset/brats2021/data", _.strip()) for _ in fp.readlines()]
 
     def __len__(self):
         return len(self.split_keys)
