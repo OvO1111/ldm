@@ -67,7 +67,7 @@ class LPIPS(nn.Module):
             param.requires_grad = False
 
     def load_from_pretrained(self, name="vgg_lpips"):
-        ckpt = get_ckpt_path(name, "/mnt/lustrenew/hukeyi/lwh/dlr/dependencies/vgg16-397923af.pth")
+        ckpt = get_ckpt_path(name, "/mnt/lustrenew/hukeyi/lwh/dlr/ldm/dependency/vgg16-397923af.pth")
         self.load_state_dict(torch.load(ckpt, map_location=torch.device("cpu")), strict=False)
         print("loaded pretrained LPIPS loss from {}".format(ckpt))
 
