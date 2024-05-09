@@ -612,6 +612,7 @@ if __name__ == "__main__":
     cfgdir = os.path.join(logdir, "configs")
     os.makedirs(ckptdir, exist_ok=True)
     os.makedirs(cfgdir, exist_ok=True)
+    os.makedirs(os.path.join(logdir, "wandb"), exist_ok=True)
     seed_everything(opt.seed)
 
     try:
