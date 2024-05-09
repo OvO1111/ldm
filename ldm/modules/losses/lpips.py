@@ -42,8 +42,7 @@ def get_ckpt_path(name, root, check=False):
     assert name in URL_MAP
     path = root
     if not os.path.exists(path) or (check and not md5_hash(path) == MD5_MAP[name]):
-        print("Downloading {} model from {} to {}".format(
-            name, URL_MAP[name], path))
+        print("Downloading {} model from {} to {}".format(name, URL_MAP[name], path))
         download(URL_MAP[name], path)
         md5 = md5_hash(path)
         assert md5 == MD5_MAP[name], md5
@@ -76,7 +75,7 @@ class LPIPS(nn.Module):
         if name != "vgg_lpips":
             raise NotImplementedError
         model = cls()
-        ckpt = get_ckpt_path(name)
+        ckpt = get_ckpt_path(name, "/mnt/lustrenew/hukeyi/lwh/dlr/ldm/dependency/vgg16-397923af.pth")
         model.load_state_dict(torch.load(ckpt, map_location=torch.device("cpu")), strict=False)
         return model
 
