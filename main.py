@@ -157,7 +157,7 @@ def get_parser(**parser_kwargs):
         "-l",
         "--logdir",
         type=str,
-        default="/mnt/data/smart_health_02/dailinrui/data/pretrained/ldm",
+        default="/mnt/lustrenew/hukeyi/lwh/dlr/runs/ldm",
         help="directory for logging dat shit",
     )
     parser.add_argument(
