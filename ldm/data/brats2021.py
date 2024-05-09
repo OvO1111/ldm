@@ -17,7 +17,7 @@ class BraTS2021_3D(Dataset):
         self.load_fn = lambda x: h5py.File(x)
         self.transforms = dict(
             crop=TorchioForegroundCropper(crop_level="patch", crop_kwargs=dict(output_size=crop_to)) if crop_to is not None else identity,
-            normalize_image=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(-5, 5), include=["image"]),
+            normalize_image=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(0, 2048), include=["image"]),
             normalize_mask=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(0, 3), include=["mask"])
         )
 
