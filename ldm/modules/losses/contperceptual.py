@@ -50,7 +50,7 @@ class LPIPSWithDiscriminator(nn.Module):
     def __init__(self, disc_start, logvar_init=1.0, kl_weight=1.0, pixelloss_weight=1.0,
                  disc_num_layers=3, disc_in_channels=3, disc_factor=1.0, disc_weight=1.0,
                  perceptual_weight=1.0, use_actnorm=False, disc_conditional=False,
-                 disc_loss="hinge", pixel_loss="l1", image_gan_weight=0, ct_gan_weight=1, gan_feat_weight=0.0, dims=2):
+                 disc_loss="hinge", pixel_loss="l1", image_gan_weight=.5, ct_gan_weight=.5, gan_feat_weight=0.0, dims=2):
 
         super().__init__()
         assert disc_loss in ["hinge", "vanilla"]
