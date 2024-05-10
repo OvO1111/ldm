@@ -126,8 +126,8 @@ class vgg16(torch.nn.Module):
     def __init__(self, requires_grad=False, pretrained=True):
         super(vgg16, self).__init__()
         vgg_model = models.vgg16(pretrained=False)
-        vgg_model_pretrained = vgg_model.load_state_dict(torch.load("/mnt/lustrenew/hukeyi/lwh/dlr/ldm/dependency/vgg16-397923af.pth", map_location="cpu"))
-        vgg_pretrained_features = vgg_model_pretrained.features
+        vgg_model.load_state_dict(torch.load("/mnt/lustrenew/hukeyi/lwh/dlr/ldm/dependency/vgg16-397923af.pth", map_location="cpu"))
+        vgg_pretrained_features = vgg_model.features
         self.slice1 = torch.nn.Sequential()
         self.slice2 = torch.nn.Sequential()
         self.slice3 = torch.nn.Sequential()
