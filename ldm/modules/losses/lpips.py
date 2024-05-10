@@ -67,7 +67,7 @@ class LPIPS(nn.Module):
             param.requires_grad = False
 
     def load_from_pretrained(self, name="vgg_lpips"):
-        ckpt = get_ckpt_path(name, "/mnt/data/oss_beijing/dailinrui/data/pretrained_weights/vgg_lpips.pth")
+        ckpt = get_ckpt_path(name, "./dependency/vgg_lpips.pth")
         self.load_state_dict(torch.load(ckpt, map_location=torch.device("cpu")), strict=False)
         print("loaded pretrained LPIPS loss from {}".format(ckpt))
 
@@ -126,7 +126,9 @@ class NetLinLayer(nn.Module):
 class vgg16(torch.nn.Module):
     def __init__(self, requires_grad=False, pretrained=True):
         super(vgg16, self).__init__()
-        vgg_pretrained_features = models.vgg16(pretrained=pretrained).features
+        vgg_pretrained_model = models.vgg16(pretrained=False)
+        vgg_pretrained_model.load_state_dict(torch.load("./dependency/vgg16-397923af.pth", map_location="cpu"))
+        vgg_pretrained_features = vgg_pretrained_model.features
         self.slice1 = torch.nn.Sequential()
         self.slice2 = torch.nn.Sequential()
         self.slice3 = torch.nn.Sequential()

@@ -16,7 +16,7 @@ from queue import Queue
 from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
-from pytorch_lightning.loggers import WandbLogger, TestTubeLogger
+from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities.distributed import rank_zero_only
 from pytorch_lightning.utilities import rank_zero_info
 
@@ -157,7 +157,7 @@ def get_parser(**parser_kwargs):
         "-l",
         "--logdir",
         type=str,
-        default="/mnt/data/smart_health_02/dailinrui/data/pretrained/ldm",
+        default="/ailab/user/dailinrui/data/ldm",
         help="directory for logging dat shit",
     )
     parser.add_argument(
@@ -345,7 +345,6 @@ class ImageLogger(Callback):
         self.batch_freq = batch_frequency
         self.max_images = max_images
         self.logger_log_images = {
-            TestTubeLogger: self._testtube,
             WandbLogger: self._wandb
         }
         self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
@@ -367,21 +366,6 @@ class ImageLogger(Callback):
         self.logger = {}
         for name, val in logger.items():
             self.logger[name] = _get_logger(val["target"], val.get("params"))
-
-    @rank_zero_only
-    def _testtube(self, pl_module, images, batch_idx, split):
-        random = np.random.randint(images[list(images.keys())[0]].shape[2])
-        for k in images:
-            _im = images[k]
-            if len(_im.shape) == 5: _im = _im[:, :, random]
-            grid = torchvision.utils.make_grid(_im.contiguous().view((-1, 1) + _im.shape[-2:]), nrow=_im.shape[0])
-            if self.rescale:
-                grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
-
-            tag = f"{split}/{k}"
-            pl_module.logger.experiment.add_image(
-                tag, grid,
-                global_step=pl_module.global_step)
             
     @rank_zero_only
     def _wandb(self, pl_module, images, batch_idx, split):
@@ -654,14 +638,6 @@ if __name__ == "__main__":
                     "save_dir": logdir,
                     "offline": opt.debug,
                     "id": nowname,
-                }
-            },
-            "testtube": {
-                "target": "pytorch_lightning.loggers.TestTubeLogger",
-                "params": {
-                    "name": "testtube",
-                    "save_dir": logdir,
-                    "version": 0
                 }
             },
         }
