@@ -3,6 +3,7 @@ import numpy as np
 import time
 import torch
 import wandb
+import shutil
 import torchvision
 import pytorch_lightning as pl
 
@@ -329,7 +330,7 @@ class SetupCallback(Callback):
                 dst = os.path.join(dst, "child_runs", name)
                 os.makedirs(os.path.split(dst)[0], exist_ok=True)
                 try:
-                    os.rename(self.logdir, dst)
+                    shutil.copytree(self.logdir, dst)
                 except FileNotFoundError:
                     pass
                 except FileExistsError:
@@ -386,8 +387,7 @@ class ImageLogger(Callback):
         self.keep_queue.put_nowait(entry)
 
     @rank_zero_only
-    def log_local(self, save_dir, split, images,
-                  global_step, current_epoch, batch_idx):
+    def log_local(self, save_dir, split, images, global_step, current_epoch, batch_idx):
         root = os.path.join(save_dir, "images", split)
         local_images = {}
         for k in images:
@@ -467,7 +467,7 @@ class ImageLogger(Callback):
             return True
         return False
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         if not self.disabled and (pl_module.global_step > 0 or self.log_first_step):
             self.log_img(pl_module, batch, batch_idx, split="train")
 
@@ -487,7 +487,7 @@ class CUDACallback(Callback):
         torch.cuda.synchronize(trainer.root_gpu)
         self.start_time = time.time()
 
-    def on_train_epoch_end(self, trainer, pl_module, outputs):
+    def on_train_epoch_end(self, trainer, pl_module):
         torch.cuda.synchronize(trainer.root_gpu)
         max_memory = torch.cuda.max_memory_allocated(trainer.root_gpu) / 2 ** 20
         epoch_time = time.time() - self.start_time
@@ -695,7 +695,7 @@ if __name__ == "__main__":
                     "max_images": 4,
                     "clamp": True,
                     "rescale": False,
-                    "rescale_fn": "clamp"
+                    "rescale_fn": "clamp",
                 }
             },
             "learning_rate_logger": {

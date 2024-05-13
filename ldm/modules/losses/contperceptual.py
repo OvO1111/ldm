@@ -233,7 +233,7 @@ class LPIPSWithDiscriminator(nn.Module):
             else:
                 d_weight = torch.tensor(0.0)
                 
-            # GAN feature matching loss - tune features such that we get the same prediction result on the discriminator
+            # GAN feature matching loss - tune features such that we get the same prediction result on the discriminator, added in medicaldiffusion's adaptation
             frame_gan_feat_loss = 0
             ct_gan_feat_loss = 0
             feat_weights = 4.0 / (3 + 1)

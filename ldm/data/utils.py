@@ -1,5 +1,5 @@
 import os, os.path as path, yaml, pathlib as pb
-import json, torchio as tio, torchvision as tv, shutil, nibabel as nib
+import json, torchio as tio, shutil, nibabel as nib
 import re, SimpleITK as sitk, scipy.ndimage as ndimage, numpy as np, multiprocessing as mp
 
 import torch
@@ -7,7 +7,6 @@ import torch
 from tqdm import tqdm
 from einops import rearrange
 from datetime import datetime
-from omegaconf import OmegaConf
 from functools import reduce, partial
 from collections import OrderedDict, defaultdict
 
@@ -115,10 +114,11 @@ def load_or_write_split(basefolder, force=False, **splits):
 
 
 class TorchioForegroundCropper(tio.transforms.Transform):
-    def __init__(self, crop_level="all", crop_kwargs=None,
+    def __init__(self, crop_level="all", crop_kwargs=None, crop_anchor=None,
                  *args, **kwargs):
         self.crop_level = crop_level
         self.crop_kwargs = crop_kwargs
+        self.crop_anchor = crop_anchor
         super().__init__(*args, **kwargs)
 
     def apply_transform(self, data: tio.Subject):
@@ -129,9 +129,8 @@ class TorchioForegroundCropper(tio.transforms.Transform):
         if self.crop_level == "all":
             return data
 
-        assert "image" in subject_
         if self.crop_level == "patch":
-            image_ = subject_["image"]
+            image_ = subject_[self.crop_anchor]
             output_size = self.crop_kwargs["output_size"]
             
             pw = max((output_size[0] - image_.shape[1]) // 2 + 3, 0)
@@ -152,7 +151,7 @@ class TorchioForegroundCropper(tio.transforms.Transform):
         if isinstance(outline, int): outline = [outline] * 6
         if len(outline) == 3: outline = reduce(lambda x, y: x + y, zip(outline, outline))
         if self.crop_level == "image_foreground":
-            image_ = subject_["image"]
+            image_ = subject_[self.crop_anchor]
             s1, e1 = torch.where((image_ >= self.crop_kwargs.get('foreground_hu_lb', 0)).any(-1).any(-1).any(0))[0][[0, -1]]
             s2, e2 = torch.where((image_ >= self.crop_kwargs.get('foreground_hu_lb', 0)).any(1).any(-1).any(0))[0][[0, -1]]
             s3, e3 = torch.where((image_ >= self.crop_kwargs.get('foreground_hu_lb', 0)).any(1).any(1).any(0))[0][[0, -1]]
@@ -161,9 +160,8 @@ class TorchioForegroundCropper(tio.transforms.Transform):
                        slice(max(0, s3 - outline[4]), min(e3 + 1 + outline[5], image_.shape[3]))]
             subject_ = {k: tio.Image(tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
         
-        assert "mask" in subject_
         if self.crop_level == "mask_foreground":
-            mask_ = conserve_only_certain_labels(subject_["mask"], self.crop_kwargs.get("foreground_mask_label", None))
+            mask_ = conserve_only_certain_labels(subject_[self.crop_anchor], self.crop_kwargs.get("foreground_mask_label", None))
             s1, e1 = torch.where(mask_.any(-1).any(-1).any(0))[0][[0, -1]]
             s2, e2 = torch.where(mask_.any(1).any(-1).any(0))[0][[0, -1]]
             s3, e3 = torch.where(mask_.any(1).any(1).any(0))[0][[0, -1]]

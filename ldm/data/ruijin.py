@@ -16,11 +16,11 @@ class Ruijin_3D(Dataset):
                 force_rewrite_split=False, 
                 resize_to=(64, 128, 128)):
         super().__init__()
-        with open('/mnt/data/oss_beijing/dailinrui/data/ruijin/records/dataset_crc_v2.json', 'rt') as f:
+        with open('/ailab/group/pjlab-smarthealth03/transfers/dailinrui/ruijin/records/dataset_crc_v2.json', 'rt') as f:
             self.data = json.load(f)
             self.data_keys = list(self.data.keys())
 
-        self.base_folder = "/mnt/data/oss_beijing/dailinrui/data/ruijin"
+        self.base_folder = "/ailab/group/pjlab-smarthealth03/transfers/dailinrui/ruijin"
         self.load_fn = lambda x: sitk.GetArrayFromImage(sitk.ReadImage(x))
         self.transforms = dict(
             resize=tio.Resize(resize_to) if resize_to is not None else tio.Lambda(identity),
@@ -37,7 +37,7 @@ class Ruijin_3D(Dataset):
         self.val_keys = self.data_keys[round(len(self.data_keys) * 0.7):round(len(self.data_keys) * 0.8)]
         self.test_keys = self.data_keys[round(len(self.data_keys) * 0.8):]
 
-        self.train_keys, self.val_keys, self.test_keys = load_or_write_split("/mnt/data/smart_health_02/dailinrui/data/pretrained/ldm/contrastive_exp_split",
+        self.train_keys, self.val_keys, self.test_keys = load_or_write_split("/ailab/user/dailinrui/data/ldm/",
                                                                              force_rewrite_split,
                                                                              train=self.train_keys, 
                                                                              val=self.val_keys, test=self.test_keys)

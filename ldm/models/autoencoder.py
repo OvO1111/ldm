@@ -41,6 +41,8 @@ class VQModel(pl.LightningModule):
         self.image_key = image_key
         self.encoder = Encoder(**ddconfig)
         self.decoder = Decoder(**ddconfig)
+        if "params" in lossconfig:
+            lossconfig["params"]["dims"] = dims
         self.loss = instantiate_from_config(lossconfig)
         self.quantize = VectorQuantizer(n_embed, embed_dim, beta=0.25,)
                                         # remap=remap,
@@ -310,7 +312,7 @@ class AutoencoderKL(pl.LightningModule):
                  ignore_keys=[],
                  image_key="image",
                  colorize_nlabels=None,
-                 monitor=None, dims=3, conditional=False, cond_key=None
+                 monitor=None, dims=3, is_conditional=False, cond_key=None
                  ):
         super().__init__()
         self.image_key = image_key
@@ -332,9 +334,8 @@ class AutoencoderKL(pl.LightningModule):
             self.monitor = monitor
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
-        self.conditional = False
-        if conditional:
-            self.conditional = True
+        self.is_conditional = is_conditional
+        if is_conditional:
             self.cond_key = cond_key
             assert self.cond_key is not None
 
@@ -349,24 +350,24 @@ class AutoencoderKL(pl.LightningModule):
         self.load_state_dict(sd, strict=False)
         print(f"Restored from {path}")
 
-    def encode(self, x):
-        h = self.encoder(x)
+    def encode(self, x, c_cat=None):
+        h = self.encoder(x, {"c_concat": c_cat})
         moments = self.quant_conv(h)
         posterior = DiagonalGaussianDistribution(moments)
         return posterior
 
-    def decode(self, z):
+    def decode(self, z, c_cat=None):
         z = self.post_quant_conv(z)
-        dec = self.decoder(z)
+        dec = self.decoder(z, {"c_concat": c_cat})
         return dec
 
-    def forward(self, input, sample_posterior=True):
-        posterior = self.encode(input)
+    def forward(self, input, conditions=None, sample_posterior=True):
+        posterior = self.encode(input, conditions)
         if sample_posterior:
             z = posterior.sample()
         else:
             z = posterior.mode()
-        dec = self.decode(z)
+        dec = self.decode(z, conditions)
         return dec, posterior
     
     def reverse_forward(self, input, sample_posterior=True):
@@ -386,8 +387,8 @@ class AutoencoderKL(pl.LightningModule):
 
     def training_step(self, batch, batch_idx, optimizer_idx):
         inputs = self.get_input(batch, self.image_key)
-        reconstructions, posterior = self(inputs)
-        if self.conditional: inputs = self.get_input(batch, self.cond_key)
+        if self.is_conditional: c_cat = self.get_input(batch, self.cond_key)
+        reconstructions, posterior = self(inputs, c_cat)
         if optimizer_idx == 0:
             # train encoder+decoder+logvar
             aeloss, log_dict_ae = self.loss(inputs, reconstructions, posterior, optimizer_idx, self.global_step,
@@ -407,8 +408,8 @@ class AutoencoderKL(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         inputs = self.get_input(batch, self.image_key)
-        reconstructions, posterior = self(inputs)
-        if self.conditional: inputs = self.get_input(batch, self.cond_key)
+        if self.is_conditional: conditions = self.get_input(batch, self.cond_key)
+        reconstructions, posterior = self(inputs, conditions)
         aeloss, log_dict_ae = self.loss(inputs, reconstructions, posterior, 0, self.global_step,
                                         last_layer=self.get_last_layer(), split="val")
 
@@ -438,18 +439,19 @@ class AutoencoderKL(pl.LightningModule):
     def log_images(self, batch, only_inputs=False, **kwargs):
         log = dict()
         x = self.get_input(batch, self.image_key)
+        if self.is_conditional: conditions = self.get_input(batch, self.cond_key)
         x = x.to(self.device)
         if not only_inputs:
-            xrec, posterior = self(x)
+            xrec, posterior = self(x, conditions)
             if x.shape[1] == 3:
                 # colorize with random projection
                 assert xrec.shape[1] == 3
                 x = self.to_rgb(x)
                 xrec = self.to_rgb(xrec)
-            log["samples"] = self.decode(torch.randn_like(posterior.sample()))
+            log["samples"] = self.decode(torch.randn_like(posterior.sample()), conditions)
             log["reconstructions"] = xrec
         log["inputs"] = x
-        if self.conditional:
+        if self.is_conditional:
             y = self.get_input(batch, self.cond_key)
             log["target"] = y
         return log

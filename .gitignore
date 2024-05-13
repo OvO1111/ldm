@@ -1,0 +1,5 @@
+# ignore dependent ckpts 
+dependency/*.pth
+
+# ignore slurm runs
+runs/*.txt

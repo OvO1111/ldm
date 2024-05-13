@@ -388,7 +388,7 @@ class Model(nn.Module):
 class Encoder(nn.Module):
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels,
-                 resolution, z_channels, double_z=True, use_linear_attn=False, attn_type="vanilla", dims=3,
+                 resolution, z_channels, double_z=True, use_linear_attn=False, attn_type="vanilla", dims=3, condition_channels=0,
                  **ignore_kwargs):
         super().__init__()
         if use_linear_attn: attn_type = "linear"
@@ -401,11 +401,11 @@ class Encoder(nn.Module):
         self.conv_nd = torch.nn.Conv2d if dims == 2 else torch.nn.Conv3d if dims == 3 else None
 
         # downsampling
-        self.conv_in = self.conv_nd(in_channels,
-                                       self.ch,
-                                       kernel_size=3,
-                                       stride=1,
-                                       padding=1)
+        self.conv_in = self.conv_nd(in_channels + condition_channels,
+                                    self.ch,
+                                    kernel_size=3,
+                                    stride=1,
+                                    padding=1)
 
         curr_res = min(resolution)
         in_ch_mult = (1,)+tuple(ch_mult)
@@ -447,14 +447,21 @@ class Encoder(nn.Module):
         # end
         self.norm_out = Normalize(block_in)
         self.conv_out = self.conv_nd(block_in,
-                                        2*z_channels if double_z else z_channels,
-                                        kernel_size=3,
-                                        stride=1,
-                                        padding=1)
+                                    2*z_channels if double_z else z_channels,
+                                    kernel_size=3,
+                                    stride=1,
+                                    padding=1)
 
-    def forward(self, x):
+    def forward(self, x, c=None):
         # timestep embedding
         temb = None
+        if c is not None:
+            # only accepts concat conditions for now
+            if "c_concat" in c: 
+                assert x.shape[2:] == c["c_concat"].shape[2:]
+                x = torch.cat([x, c["c_concat"]], dim=1)
+            if "crossattn" in c:
+                raise NotImplementedError("VAE not implemented for crossattn condition")
 
         # downsampling
         hs = [self.conv_in(x)]
@@ -483,7 +490,7 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels,
-                 resolution, z_channels, give_pre_end=False, tanh_out=False, use_linear_attn=False, dims=3,
+                 resolution, z_channels, give_pre_end=False, tanh_out=False, use_linear_attn=False, dims=3, condition_channels=0,
                  attn_type="vanilla", **ignorekwargs):
         super().__init__()
         if use_linear_attn: attn_type = "linear"
@@ -548,19 +555,19 @@ class Decoder(nn.Module):
 
         # end
         self.norm_out = Normalize(block_in)
-        self.conv_out = self.conv_nd(block_in,
-                                        out_ch,
-                                        kernel_size=3,
-                                        stride=1,
-                                        padding=1)
+        self.conv_out = self.conv_nd(block_in + condition_channels,
+                                    out_ch,
+                                    kernel_size=3,
+                                    stride=1,
+                                    padding=1)
 
-    def forward(self, z):
+    def forward(self, z, c=None):
         #assert z.shape[1:] == self.z_shape[1:]
         self.last_z_shape = z.shape
 
         # timestep embedding
         temb = None
-
+        
         # z to block_in
         h = self.conv_in(z)
 
@@ -581,8 +588,16 @@ class Decoder(nn.Module):
         # end
         if self.give_pre_end:
             return h
-
         h = self.norm_out(h)
+
+        if c is not None:
+            # only accepts concat conditions for now
+            if "c_concat" in c: 
+                assert h.shape[2:] == c["c_concat"].shape[2:]
+                h = torch.cat([h, c["c_concat"]], dim=1)
+            if "c_crossattn" in c:
+                raise NotImplementedError("VAE not implemented for crossattn condition")
+            
         h = nonlinearity(h)
         h = self.conv_out(h)
         if self.tanh_out:
