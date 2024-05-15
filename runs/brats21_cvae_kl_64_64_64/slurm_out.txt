@@ -1,2 +1,0 @@
-W&B offline. Running your script from this directory will only write metadata locally. Use wandb disabled to completely turn off W&B.
-brats21_cvae_kl_64_64_64
