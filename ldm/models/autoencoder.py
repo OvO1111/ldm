@@ -312,7 +312,7 @@ class AutoencoderKL(pl.LightningModule):
                  ignore_keys=[],
                  image_key="image",
                  colorize_nlabels=None,
-                 monitor=None, dims=3, is_conditional=False, cond_key=None
+                 monitor=None, dims=3, is_conditional=False, cond_key=None, conditioning_key="concat"
                  ):
         super().__init__()
         self.image_key = image_key
@@ -337,6 +337,7 @@ class AutoencoderKL(pl.LightningModule):
         self.is_conditional = is_conditional
         if is_conditional:
             self.cond_key = cond_key
+            self.conditioning_key = conditioning_key
             assert self.cond_key is not None
 
     def init_from_ckpt(self, path, ignore_keys=list()):
@@ -351,14 +352,14 @@ class AutoencoderKL(pl.LightningModule):
         print(f"Restored from {path}")
 
     def encode(self, x, c_cat=None):
-        h = self.encoder(x, {"c_concat": c_cat})
+        h = self.encoder(x, {f"c_{self.conditioning_key}": c_cat} if c_cat is not None else None)
         moments = self.quant_conv(h)
         posterior = DiagonalGaussianDistribution(moments)
         return posterior
 
     def decode(self, z, c_cat=None):
         z = self.post_quant_conv(z)
-        dec = self.decoder(z, {"c_concat": c_cat})
+        dec = self.decoder(z, {f"c_{self.conditioning_key}": c_cat} if c_cat is not None else None)
         return dec
 
     def forward(self, input, conditions=None, sample_posterior=True):
@@ -388,6 +389,7 @@ class AutoencoderKL(pl.LightningModule):
     def training_step(self, batch, batch_idx, optimizer_idx):
         inputs = self.get_input(batch, self.image_key)
         if self.is_conditional: c_cat = self.get_input(batch, self.cond_key)
+        else: c_cat = None
         reconstructions, posterior = self(inputs, c_cat)
         if optimizer_idx == 0:
             # train encoder+decoder+logvar
@@ -409,6 +411,7 @@ class AutoencoderKL(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         inputs = self.get_input(batch, self.image_key)
         if self.is_conditional: conditions = self.get_input(batch, self.cond_key)
+        else: conditions = None
         reconstructions, posterior = self(inputs, conditions)
         aeloss, log_dict_ae = self.loss(inputs, reconstructions, posterior, 0, self.global_step,
                                         last_layer=self.get_last_layer(), split="val")
@@ -440,6 +443,7 @@ class AutoencoderKL(pl.LightningModule):
         log = dict()
         x = self.get_input(batch, self.image_key)
         if self.is_conditional: conditions = self.get_input(batch, self.cond_key)
+        else: conditions = None
         x = x.to(self.device)
         if not only_inputs:
             xrec, posterior = self(x, conditions)
@@ -453,7 +457,7 @@ class AutoencoderKL(pl.LightningModule):
         log["inputs"] = x
         if self.is_conditional:
             y = self.get_input(batch, self.cond_key)
-            log["target"] = y
+            log["conditioning"] = y
         return log
 
     def to_rgb(self, x):

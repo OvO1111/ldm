@@ -791,8 +791,8 @@ if __name__ == "__main__":
 
         def divein(*args, **kwargs):
             if trainer.global_rank == 0:
-                import pudb;
-                pudb.set_trace()
+                import pdb;
+                pdb.set_trace()
 
 
         import signal

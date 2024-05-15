@@ -13,20 +13,21 @@ from ldm.data.utils import conserve_only_certain_labels, identity, window_norm, 
 
 class Ruijin_3D(Dataset):
     def __init__(self, split="train", 
-                force_rewrite_split=False, 
+                force_rewrite_split=True, 
                 resize_to=(64, 128, 128)):
         super().__init__()
-        with open('/ailab/group/pjlab-smarthealth03/transfers/dailinrui/ruijin/records/dataset_crc_v2.json', 'rt') as f:
+        with open('/ailab/user/dailinrui/data/records/dataset_crc_v2.json', 'rt') as f:
             self.data = json.load(f)
             self.data_keys = list(self.data.keys())
 
-        self.base_folder = "/ailab/group/pjlab-smarthealth03/transfers/dailinrui/ruijin"
         self.load_fn = lambda x: sitk.GetArrayFromImage(sitk.ReadImage(x))
         self.transforms = dict(
             resize=tio.Resize(resize_to) if resize_to is not None else tio.Lambda(identity),
-            crop=TorchioForegroundCropper(crop_level="mask_foreground", crop_kwargs=dict(foreground_hu_lb=1e-3,
-                                                                                         foreground_mask_label=None,
-                                                                                         outline=(0, 0, 0))),
+            crop=TorchioForegroundCropper(crop_level="mask_foreground", 
+                                          crop_anchor="mask",
+                                          crop_kwargs=dict(foreground_hu_lb=1e-3,
+                                                            foreground_mask_label=None,
+                                                            outline=(0, 0, 0))),
             normalize_image=tio.Lambda(window_norm, include=["image"]),
             normalize_mask=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(0, 11), include=["mask"])
         )
