@@ -2,4 +2,4 @@
 dependency/*.pth
 
 # ignore slurm runs
-runs/*
+runs/
