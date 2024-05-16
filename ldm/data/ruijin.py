@@ -1,7 +1,7 @@
 import os, sys
-sys.path.append("/mnt/workspace/dailinrui/code/latentdiffusion")
-import json, torchio as tio, torchvision.transforms.v2 as v2, shutil, nibabel as nib
-import h5py, SimpleITK as sitk, scipy.ndimage as ndimage, numpy as np, multiprocessing as mp
+sys.path.append("/ailab/user/dailinrui/code/latentdiffusion")
+import h5py, SimpleITK as sitk, numpy as np
+import json, torchio as tio, torchvision.transforms.v2 as v2, shutil
 
 import torch, random
 from tqdm import tqdm
@@ -48,7 +48,7 @@ class Ruijin_3D(Dataset):
         return len(self.split_keys)
 
     def __getitem__(self, idx):
-        item = self.data[self.split_keys[idx]]
+        item = self.data[self.split_keys[idx]] if isinstance(idx, int) else idx
         data, totalseg, crcseg, text = map(lambda x: item[x], ["ct", "totalseg", "crcseg", "summary"])
         image, mask, crcmask = map(self.load_fn, [data, totalseg, crcseg])
         
@@ -207,10 +207,15 @@ class RuijinJointDataset(Dataset):
 
 
 if __name__ == "__main__":
-    import time
+    # group ruijin dataset
     ds = Ruijin_3D(resize_to=None)
-    st = time.time()
-    test_case = ds[0]
-    print(test_case["text"], time.time() - st)
-    sitk.WriteImage(sitk.GetImageFromArray(test_case["image"][0].numpy()), "./test_proc_im.nii.gz")
-    sitk.WriteImage(sitk.GetImageFromArray((test_case["mask"][0] * 11).numpy().astype(np.uint8)), "./test_proc_mask.nii.gz")
+    ds.transforms["crop"] = TorchioForegroundCropper(crop_level="all")
+    ds.transforms["normalize_mask"] = tio.Lambda(identity)
+    iterator = tqdm(ds.data_keys)
+    for key in iterator:
+        data = ds[ds.data[key]]
+        data = {k: v.cpu().numpy() for k, v in data.items() if torch.is_tensor(v)}
+        np.savez(os.path.join("/ailab/user/dailinrui/data/datasets/ruijin", key + ".npz"), **data)
+        iterator.set_postfix(save_path=os.path.join("/ailab/user/dailinrui/data/datasets/ruijin", key + ".npz"),
+                             data_keys=list(data.keys()),
+                             data_shape=list(map(lambda x: data[x].shape, data.keys())))

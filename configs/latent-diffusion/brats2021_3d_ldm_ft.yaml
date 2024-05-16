@@ -1,19 +1,23 @@
 model:
-  base_learning_rate: 2.0e-05
-  target: ldm.models.diffusion.ddpm.LatentDiffusion
+  base_learning_rate: 2.0e-06
+  target: ldm.models.diffusion.ddpm.Img2MaskDiffusion
   params:
     linear_start: 0.0015
     linear_end: 0.0195
     num_timesteps_cond: 1
     log_every_t: 200
-    timesteps: 1000
-    first_stage_key: image
+    timesteps: 1
+    image_key: image
     cond_stage_key: coarse
+    mask_key: fine
     conditioning_key: concat
     image_size: [8, 8, 8]  # after first-stage encoding
     channels: 4  # after first-stage encoding
     monitor: val/loss_simple_ema
-    cond_stage_trainable: true
+    cond_stage_trainable: false
+    vae_decoder_trainable: false
+    ckpt_path: /ailab/user/dailinrui/data/ldm/static_brats21_ldm_cvae_kl_64_64_64/checkpoints/last.ckpt
+    ignore_keys: [betas, alphas_cumprod, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, log_one_minus_alphas_cumprod, sqrt_recip_alphas_cumprod, sqrt_recipm1_alphas_cumprod, posterior_variance, posterior_log_variance_clipped, posterior_mean_coef1, posterior_mean_coef2]
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
@@ -72,7 +76,6 @@ model:
         attn_type: vanilla
         use_checkpoint: True  # always use ckpt
 
-
 data:
   target: main.DataModuleFromConfig
   params:
@@ -84,21 +87,25 @@ data:
       params:
         split: train
         crop_to: [64, 64, 64]
+        max_size: 10
     validation:
       target: ldm.data.brats2021.BraTS2021_3D
       params:
         split: val
         crop_to: [64, 64, 64]
 
-
 lightning:
   callbacks:
     image_logger:
       target: main.ImageLogger
       params:
-        batch_frequency: 400
-        max_images: 4
+        train_batch_frequency: 1
+        val_batch_frequency: 20
+        max_images: 10
+        log_images_kwargs:
+          ddim_steps: null
         increase_log_steps: False
+        log_on_batch_idx: true
         logger:
           inputs: 
             target: image_rescale
@@ -113,4 +120,4 @@ lightning:
 
   trainer:
     benchmark: True
-    max_epochs: 1000
+    max_epochs: 200

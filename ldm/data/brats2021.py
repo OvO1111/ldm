@@ -29,7 +29,9 @@ class BraTS2021_3D(Dataset):
     n_coarse = 1
     n_fine = 3
     def __init__(self, split="train", 
-                crop_to=(96, 96, 96)):
+                crop_to=(96, 96, 96),
+                use_shm=False,
+                max_size=None):
         super().__init__()
         self.load_fn = lambda x: h5py.File(x)
         self.transforms = dict(
@@ -41,10 +43,11 @@ class BraTS2021_3D(Dataset):
         )
 
         self.split = split
-        with open(f"/ailab/group/pjlab-smarthealth03/transfers/dailinrui/data/dataset/BraTS2021/{split}.list") as fp:
-            self.split_keys = [os.path.join("/ailab/group/pjlab-smarthealth03/transfers/dailinrui/data/dataset/BraTS2021/data", _.strip()) for _ in fp.readlines()]
+        base = "/ailab/group/pjlab-smarthealth03/transfers/dailinrui/data/dataset/BraTS2021" if not use_shm else "/dev/shm/BraTS2021"
+        with open(f"{base}/{split}.list") as fp:
+            self.split_keys = [os.path.join(f"{base}/data", _.strip()) for _ in fp.readlines()][:max_size]
             
-        for broken_file in [os.path.join("/ailab/group/pjlab-smarthealth03/transfers/dailinrui/data/dataset/BraTS2021/data", _) for _ in ["BraTS2021_00000.h5"]]: self.split_keys.remove(broken_file) if broken_file in self.split_keys else 0
+        for broken_file in [os.path.join(f"{base}/data", _) for _ in ["BraTS2021_00000.h5"]]: self.split_keys.remove(broken_file) if broken_file in self.split_keys else 0
             
         self.datatypes = {"image": ["image"], "mask": ["coarse", "fine"], "text": []}
         self.logger_kwargs = {"coarse": {"n": self.n_coarse}, "fine": {"n": self.n_fine}}

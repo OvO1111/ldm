@@ -165,7 +165,7 @@ class DDPM(pl.LightningModule):
         else:
             raise NotImplementedError("mu not supported")
         # TODO how to choose this term
-        lvlb_weights[0] = lvlb_weights[1]
+        lvlb_weights[0] = lvlb_weights[1] if len(lvlb_weights) > 1 else torch.ones_like(lvlb_weights[0])
         self.register_buffer('lvlb_weights', lvlb_weights, persistent=False)
         assert not torch.isnan(self.lvlb_weights).all()
 
@@ -251,12 +251,13 @@ class DDPM(pl.LightningModule):
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
     @torch.no_grad()
-    def p_sample_loop(self, shape, return_intermediates=False):
+    def p_sample_loop(self, shape, return_intermediates=False, verbose=False):
         device = self.betas.device
         b = shape[0]
         img = torch.randn(shape, device=device)
         intermediates = [img]
-        for i in tqdm(reversed(range(0, self.num_timesteps)), desc='Sampling t', total=self.num_timesteps):
+        iterator = tqdm(reversed(range(0, self.num_timesteps)), desc='Sampling t', total=self.num_timesteps) if verbose else reversed(range(0, self.num_timesteps))
+        for i in iterator:
             img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long),
                                 clip_denoised=self.clip_denoised)
             if i % self.log_every_t == 0 or i == self.num_timesteps - 1:
@@ -305,7 +306,7 @@ class DDPM(pl.LightningModule):
         else:
             raise NotImplementedError(f"Paramterization {self.parameterization} not yet supported")
 
-        loss = self.get_loss(model_out, target, mean=False).mean(dim=[1, 2, 3])
+        loss = self.get_loss(model_out, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
 
         log_prefix = 'train' if self.training else 'val'
 
@@ -400,7 +401,7 @@ class DDPM(pl.LightningModule):
 
         if sample:
             # get denoise row
-            with self.ema_scope("Plotting"):
+            with self.ema_scope():
                 samples, denoise_row = self.sample(batch_size=N, return_intermediates=True)
 
             log["samples"] = samples
@@ -1027,7 +1028,7 @@ class LatentDiffusion(DDPM):
         else:
             raise NotImplementedError()
 
-        loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3])
+        loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
         logvar_t = self.logvar.to(self.device)[t]
@@ -1039,7 +1040,7 @@ class LatentDiffusion(DDPM):
 
         loss = self.l_simple_weight * loss.mean()
 
-        loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
+        loss_vlb = self.get_loss(model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
         loss += (self.original_elbo_weight * loss_vlb)
@@ -1167,7 +1168,7 @@ class LatentDiffusion(DDPM):
 
     @torch.no_grad()
     def p_sample_loop(self, cond, shape, return_intermediates=False,
-                      x_T=None, verbose=True, callback=None, timesteps=None, quantize_denoised=False,
+                      x_T=None, verbose=False, callback=None, timesteps=None, quantize_denoised=False,
                       mask=None, x0=None, img_callback=None, start_T=None,
                       log_every_t=None):
 
@@ -1305,7 +1306,7 @@ class LatentDiffusion(DDPM):
 
         if sample:
             # get denoise row
-            with self.ema_scope("Plotting"):
+            with self.ema_scope():
                 samples, z_denoise_row = self.sample_log(cond=c,batch_size=N,ddim=use_ddim,
                                                          ddim_steps=ddim_steps,eta=ddim_eta)
                 # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
@@ -1425,27 +1426,91 @@ class DiffusionWrapper(pl.LightningModule):
             raise NotImplementedError()
 
         return out
+    
+    
+class Img2MaskDiffusion(LatentDiffusion):
+    def __init__(self, image_key, mask_key,
+                 vae_decoder_trainable=False,
+                 *args, **kwargs):
+        assert image_key != mask_key
+        self.mask_key = mask_key
+        self.training_vae_decoder = vae_decoder_trainable
+        super().__init__(first_stage_key=image_key, *args, **kwargs)
+        
+    def shared_step(self, batch, **kwargs):
+        x, c = self.get_input(batch, self.first_stage_key)
+        mx = super(LatentDiffusion, self).get_input(batch, self.mask_key)
+        mx = repeat(mx, "b c ... -> b (repeat c) ...", repeat=self.first_stage_model.encoder.in_channels)
+        cf = None if not self.first_stage_model.is_conditional else super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key)
+        encoder_posterior = self.encode_first_stage(mx, cf)
+        mz = self.get_first_stage_encoding(encoder_posterior).detach()
+        loss = self(x, c, mz)
+        return loss
+    
+    def forward(self, x, c, mx, *args, **kwargs):
+        t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+        if self.model.conditioning_key is not None:
+            assert c is not None
+            if self.cond_stage_trainable:
+                c = self.get_learned_conditioning(c)
+            if self.shorten_cond_schedule:  # TODO: drop this option
+                tc = self.cond_ids[t].to(self.device)
+                c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
+        return self.p_losses(x, c, mx, t, *args, **kwargs)
+    
+    def p_losses(self, x_start, cond, desired_x_out, t, noise=None):
+        noise = default(noise, lambda: torch.randn_like(x_start))
+        x_noisy = x_start
+        model_output = self.apply_model(x_noisy, t, cond)
 
+        loss_dict = {}
+        prefix = 'train' if self.training else 'val'
 
-class Layout2ImgDiffusion(LatentDiffusion):
-    # TODO: move all layout-specific hacks to this class
-    def __init__(self, cond_stage_key, *args, **kwargs):
-        assert cond_stage_key == 'coordinates_bbox', 'Layout2ImgDiffusion only for cond_stage_key="coordinates_bbox"'
-        super().__init__(cond_stage_key=cond_stage_key, *args, **kwargs)
+        target = desired_x_out
 
-    def log_images(self, batch, N=8, *args, **kwargs):
-        logs = super().log_images(batch=batch, N=N, *args, **kwargs)
+        loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
+        loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
-        key = 'train' if self.training else 'validation'
-        dset = self.trainer.datamodule.datasets[key]
-        mapper = dset.conditional_builders[self.cond_stage_key]
+        logvar_t = self.logvar.to(self.device)[t]
+        loss = loss_simple / torch.exp(logvar_t) + logvar_t
+        # loss = loss_simple / torch.exp(self.logvar) + self.logvar
+        if self.learn_logvar:
+            loss_dict.update({f'{prefix}/loss_gamma': loss.mean()})
+            loss_dict.update({'logvar': self.logvar.data.mean()})
 
-        bbox_imgs = []
-        map_fn = lambda catno: dset.get_textual_label(dset.get_category_id(catno))
-        for tknzd_bbox in batch[self.cond_stage_key][:N]:
-            bboximg = mapper.plot(tknzd_bbox.detach().cpu(), map_fn, (256, 256))
-            bbox_imgs.append(bboximg)
+        loss = self.l_simple_weight * loss.mean()
 
-        cond_img = torch.stack(bbox_imgs, dim=0)
-        logs['bbox_image'] = cond_img
-        return logs
+        loss_vlb = self.get_loss(model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
+        loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
+        loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
+        loss += (self.original_elbo_weight * loss_vlb)
+        loss_dict.update({f'{prefix}/loss': loss})
+
+        return loss, loss_dict
+    
+    def configure_optimizers(self):
+        lr = self.learning_rate
+        params = list(self.model.parameters())
+        if self.cond_stage_trainable:
+            print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
+            params = params + list(self.cond_stage_model.parameters())
+        if self.training_vae_decoder:
+            print(f"{self.__class__.__name__}: Also optimizing first_stage_decoder params!")
+            params = params + list(self.first_stage_model.decoder.parameters())
+        if self.learn_logvar:
+            print('Diffusion model optimizing logvar')
+            params.append(self.logvar)
+        opt = torch.optim.AdamW(params, lr=lr)
+        if self.use_scheduler:
+            assert 'target' in self.scheduler_config
+            scheduler = instantiate_from_config(self.scheduler_config)
+
+            print("Setting up LambdaLR scheduler...")
+            scheduler = [
+                {
+                    'scheduler': LambdaLR(opt, lr_lambda=scheduler.schedule),
+                    'interval': 'step',
+                    'frequency': 1
+                }]
+            return [opt], scheduler
+        return opt

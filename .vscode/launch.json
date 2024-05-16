@@ -17,7 +17,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm.yaml", "-t", "--gpus", "0,", "--name", "test"],
+            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm_ft.yaml", "-t", "--gpus", "0,", "--name", "test"],
             "console": "integratedTerminal"
         },
         {

@@ -3,3 +3,8 @@ dependency/*.pth
 
 # ignore slurm runs
 runs/
+wandb/
+
+__pycache__/
+__pycache__
+*.pyc
