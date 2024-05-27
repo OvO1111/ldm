@@ -1,12 +1,11 @@
 import os, sys
 sys.path.append("/ailab/user/dailinrui/code/latentdiffusion")
 import json, torchio as tio
-import h5py, SimpleITK as sitk, numpy as np
+import h5py, numpy as np
 
 import torch
 from tqdm import tqdm
-from functools import reduce
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, _utils
 
 from ldm.data.utils import identity, TorchioForegroundCropper
 
@@ -31,7 +30,8 @@ class BraTS2021_3D(Dataset):
     def __init__(self, split="train", 
                 crop_to=(96, 96, 96),
                 use_shm=False,
-                max_size=None):
+                max_size=None,
+                n_fine=None):
         super().__init__()
         self.load_fn = lambda x: h5py.File(x)
         self.transforms = dict(
@@ -51,6 +51,8 @@ class BraTS2021_3D(Dataset):
             
         self.datatypes = {"image": ["image"], "mask": ["coarse", "fine"], "text": []}
         self.logger_kwargs = {"coarse": {"n": self.n_coarse}, "fine": {"n": self.n_fine}}
+        self.fine_labeled_indices = list(range(n_fine if n_fine is not None else len(self.split_keys)))
+        self.coarse_labeled_indices = [i for i in range(len(self.split_keys)) if i not in self.fine_labeled_indices]
 
     def __len__(self):
         return len(self.split_keys)
@@ -67,7 +69,7 @@ class BraTS2021_3D(Dataset):
         subject = self.transforms["normalize_mask"](subject)
         # random aug
         subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
-        subject = {k: v.data for k, v in subject.items()}
+        subject = {k: v.data for k, v in subject.items()} | {"ids": idx, "mask": subject.fine.data if idx in self.fine_labeled_indices else subject.coarse.data}
 
         return subject
     
@@ -127,6 +129,9 @@ class BraTS2021_3D(Dataset):
                 iterator.set_postfix(shape=item["image"].shape)
             except Exception as e:
                 print(self.split_keys[idx], e)
+                
+    def collate(self, batch):
+        return _utils.collate.default_collate(batch)
 
 
 if __name__ == "__main__":

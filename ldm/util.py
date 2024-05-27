@@ -47,7 +47,7 @@ def ismap(x):
 def isimage(x):
     if not isinstance(x, torch.Tensor):
         return False
-    return (len(x.shape) == 4) and (x.shape[1] == 3 or x.shape[1] == 1)
+    return (len(x.shape) >= 4) and (x.shape[1] == 3 or x.shape[1] == 1)
 
 
 def exists(x):

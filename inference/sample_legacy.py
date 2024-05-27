@@ -16,11 +16,12 @@ from torchvision.utils import make_grid
 from tqdm import tqdm
 from functools import reduce
 from collections import namedtuple
-from scipy.ndimage import sobel, zoom, distance_transform_edt
+from scipy.ndimage import sobel
+from inference.utils import find_vacancy, custom_to_pil, custom_to_np, logs2pil
 
 rescale = lambda x: (x + 1.) / 2.
 
-def combine_mask_and_im(x, overlay_coef=0.2):
+def combine_mask_and_im(x, overlay_coef=0.2, n_classes=10):
     # 2 h w d
     def find_mask_boundaries_3d(im, mask, color):
         boundaries = torch.zeros_like(mask)
@@ -56,55 +57,6 @@ def combine_mask_and_im(x, overlay_coef=0.2):
     colored_im = colored_mask * overlay_coef + image * (1-overlay_coef)
     colored_im = rearrange(find_mask_boundaries_3d(colored_im, mask, colors), "d ... c -> d c ...")
     return colored_im
-
-
-def find_vacancy(path):
-    path = pb.Path(path)
-    d, f, s = path.parent, path.name, ".".join([""] + path.name.split(".")[1:])
-    exist_files = list(_.name for _ in d.glob(f"*{s}"))
-    file_num = list(int(([-1] + re.findall(r"\d+", _))[-1]) for _ in exist_files)
-    fa = [i for i in range(1000) if i not in file_num]
-    vacancy = d / (f.split(s)[0] + str(fa[0]) + s)
-    print("found vacancy at ", f.split(s)[0] + str(fa[0]) + s)
-    return vacancy
-    
-
-def custom_to_pil(x):
-    x = x.detach().cpu()
-    x = torch.clamp(x, -1., 1.)
-    x = (x + 1.) / 2.
-    x = x.permute(1, 2, 0).numpy()
-    x = (255 * x).astype(np.uint8)
-    x = Image.fromarray(x)
-    if not x.mode == "RGB":
-        x = x.convert("RGB")
-    return x
-
-
-def custom_to_np(x):
-    # saves the batch in adm style as in https://github.com/openai/guided-diffusion/blob/main/scripts/image_sample.py
-    sample = x.detach().cpu()
-    sample = ((sample + 1) * 127.5).clamp(0, 255).to(torch.uint8)
-    sample = sample.permute(0, 2, 3, 1)
-    sample = sample.contiguous()
-    return sample
-
-
-def logs2pil(logs, keys=["sample"]):
-    imgs = dict()
-    for k in logs:
-        try:
-            if len(logs[k].shape) == 4:
-                img = custom_to_pil(logs[k][0, ...])
-            elif len(logs[k].shape) == 3:
-                img = custom_to_pil(logs[k])
-            else:
-                print(f"Unknown format for key {k}. ")
-                img = None
-        except:
-            img = None
-        imgs[k] = img
-    return imgs
 
 
 @torch.no_grad()
@@ -279,7 +231,6 @@ def run(model, logdir, batch_size=50, vanilla=False, custom_steps=None, eta=None
         print(f'Using Vanilla DDPM sampling with {model.num_timesteps} sampling steps.')
     else:
         print(f'Using DDIM sampling with {custom_steps} sampling steps and eta={eta}')
-
 
     tstart = time.time()
     n_saved = len(glob.glob(os.path.join(logdir,'*.png')))-1
@@ -503,7 +454,6 @@ def compute_metrics(pred, gt, metrics=["lpips", "fvd"], batch_per_segment=None):
 
 
 if __name__ == "__main__":
-    now = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     sys.path.append(os.getcwd())
     command = " ".join(sys.argv)
 
@@ -551,7 +501,7 @@ if __name__ == "__main__":
     print(f"global step: {global_step}")
     print(75 * "=")
     print("logging to:")
-    logdir = os.path.join(logdir, "samples")
+    logdir = os.path.join(logdir, "test_samples")
     imglogdir = os.path.join(logdir, "img")
     numpylogdir = os.path.join(logdir, "numpy")
 

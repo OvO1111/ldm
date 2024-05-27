@@ -17,7 +17,15 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm_ft.yaml", "-t", "--gpus", "0,", "--name", "test"],
+            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm_c2f.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "debug latentdiffusion-testtime",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./test.py",
+            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm_test.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {

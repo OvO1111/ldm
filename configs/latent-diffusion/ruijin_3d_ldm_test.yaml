@@ -1,6 +1,6 @@
 model:
-  base_learning_rate: 2.0e-05
-  target: ldm.models.diffusion.ddpm.LatentDiffusion
+  base_learning_rate: 2.0e-06
+  target: inference.sampler.InferLatentDiffusion
   params:
     linear_start: 0.0015
     linear_end: 0.0195
@@ -10,10 +10,11 @@ model:
     first_stage_key: image
     cond_stage_key: mask
     conditioning_key: concat
-    image_size: [8, 8, 8]  # after first-stage encoding
+    image_size: [8, 16, 16]  # after first-stage encoding
     channels: 4  # after first-stage encoding
     monitor: val/loss_simple_ema
-    cond_stage_trainable: true
+    cond_stage_trainable: false
+    ckpt_path: /ailab/user/dailinrui/data/ldm/static_ruijin_ldm_vae_kl_64_128_128/checkpoints/epoch=000946.ckpt
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
@@ -21,38 +22,35 @@ model:
         image_size: 64  # not used
         in_channels: 12
         out_channels: 4
-        model_channels: 32
+        model_channels: 128
         attention_resolutions: [32, 16, 8]
         num_res_blocks: 2
         channel_mult: [1, 2, 4]
         num_head_channels: 32
-        use_checkpoint: true  # always use ckpt
+        use_checkpoint: True  # always use ckpt
 
     first_stage_config: 
       target: ldm.models.autoencoder.AutoencoderKL
       params:
         monitor: "val/rec_loss"
         image_key: image
-        cond_key: coarse
         embed_dim: 4
-        is_conditional: true
         dims: 3
-        ckpt_path: /ailab/user/dailinrui/data/ldm/static_brats21_cvae_kl_64_64_64/checkpoints/epoch=000871.ckpt
+        ckpt_path: /ailab/user/dailinrui/data/ldm/static_ruijin_vae_kl_64_128_128/checkpoints/epoch=000606.ckpt
         lossconfig:
           target: torch.nn.Identity
 
         ddconfig:
           double_z: True
           z_channels: 4
-          resolution: [128, 128, 128]
-          in_channels: 4
-          condition_channels: 1
-          out_ch: 4
+          resolution: [64, 128, 128]
+          in_channels: 1
+          out_ch: 1
           ch: 96
           ch_mult: [1,2,4,4]  # num_down = len(ch_mult)-1
           num_res_blocks: 2
           dropout: 0.0
-          attn_resolutions: [8,]  # on z axis, starting with 12->24->48 for len(ch_mult)==4 and resolution==96
+          attn_resolutions: [8,]  # on z axis, starting with 8->16->32 for len(ch_mult)==4 and resolution==64
           attn_type: vanilla
           use_checkpoint: True  # always use ckpt
 
@@ -61,7 +59,7 @@ model:
       params:
         double_z: True
         z_channels: 4
-        resolution: [128, 128, 128]
+        resolution: [64, 64, 64]
         in_channels: 1
         out_ch: 4
         ch: 96
@@ -72,39 +70,40 @@ model:
         attn_type: vanilla
         use_checkpoint: True  # always use ckpt
 
+    test_scheme: normal
+    eval_scheme: [1, 3]
 
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 2
-    num_workers: 2
-    wrap: False
-    train:
-      target: ldm.data.brats2021.BraTS2021_3D
+    batch_size: 1
+    num_workers: 5
+    wrap: false
+    batch_sampler:
+      target: inference.utils.TwoStreamBatchSampler
+    test:
+      target: ldm.data.ruijin.Ruijin_3D
       params:
-        split: train
-        crop_to: [128, 128, 128]
-    validation:
-      target: ldm.data.brats2021.BraTS2021_3D
-      params:
-        split: val
-        crop_to: [128, 128, 128]
+        split: test
 
 lightning:
   callbacks:
     image_logger:
-      target: main.ImageLogger
+      target: test.ImageLogger
       params:
-        batch_frequency: 400
-        max_images: 4
-        increase_log_steps: False
+        test_batch_frequency: 1
+        max_images: 40
+        log_separate: true
+        log_images_kwargs:
+          verbose: false
+          log_metrics: true
         logger:
           inputs: 
             target: image_rescale
           conditioning:
             target: mask_rescale
             params: 
-              n_mask: 3
+              n_mask: 11
           reconstruction:
             target: image_rescale
           samples:
@@ -112,4 +111,3 @@ lightning:
 
   trainer:
     benchmark: True
-    max_epochs: 1000

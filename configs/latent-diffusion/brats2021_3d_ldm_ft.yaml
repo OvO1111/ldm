@@ -1,12 +1,12 @@
 model:
-  base_learning_rate: 2.0e-06
+  base_learning_rate: 2.0e-05
   target: ldm.models.diffusion.ddpm.Img2MaskDiffusion
   params:
     linear_start: 0.0015
     linear_end: 0.0195
     num_timesteps_cond: 1
     log_every_t: 200
-    timesteps: 1
+    timesteps: 1000
     image_key: image
     cond_stage_key: coarse
     mask_key: fine
@@ -15,9 +15,26 @@ model:
     channels: 4  # after first-stage encoding
     monitor: val/loss_simple_ema
     cond_stage_trainable: false
-    vae_decoder_trainable: false
+    vae_decoder_trainable: true
     ckpt_path: /ailab/user/dailinrui/data/ldm/static_brats21_ldm_cvae_kl_64_64_64/checkpoints/last.ckpt
-    ignore_keys: [betas, alphas_cumprod, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, log_one_minus_alphas_cumprod, sqrt_recip_alphas_cumprod, sqrt_recipm1_alphas_cumprod, posterior_variance, posterior_log_variance_clipped, posterior_mean_coef1, posterior_mean_coef2]
+    # ignore_keys: [betas, alphas_cumprod, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, log_one_minus_alphas_cumprod, sqrt_recip_alphas_cumprod, sqrt_recipm1_alphas_cumprod, posterior_variance, posterior_log_variance_clipped, posterior_mean_coef1, posterior_mean_coef2]
+
+    vae_decoder_config:
+      target: ldm.modules.diffusionmodules.model.Decoder
+      params:
+        double_z: True
+        z_channels: 4
+        resolution: [64, 64, 64]
+        in_channels: 1
+        condition_channels: 1
+        out_ch: 4  # n_classes
+        ch: 96
+        ch_mult: [1,2,4,4]  # num_down = len(ch_mult)-1
+        num_res_blocks: 2
+        dropout: 0.0
+        attn_resolutions: [8,]  # on z axis, starting with 12->24->48 for len(ch_mult)==4 and resolution==96
+        attn_type: vanilla
+        use_checkpoint: True  # always use ckpt
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
@@ -101,23 +118,31 @@ lightning:
       params:
         train_batch_frequency: 1
         val_batch_frequency: 20
-        max_images: 10
+        max_images: 40
         log_images_kwargs:
           ddim_steps: null
-        increase_log_steps: False
         log_on_batch_idx: true
+        log_nifti: true
         logger:
           inputs: 
             target: image_rescale
           conditioning:
             target: mask_rescale
             params: 
-              n_mask: 3
+              n_mask: 2
+          mask:
+            target: mask_rescale
+            params:
+              n_mask: 4
           reconstruction:
             target: image_rescale
           samples:
             target: image_rescale
+          recovered_mask:
+            target: mask_rescale
+            params:
+              n_mask: 4
 
   trainer:
     benchmark: True
-    max_epochs: 200
+    max_epochs: 1000

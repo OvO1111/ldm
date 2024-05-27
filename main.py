@@ -5,6 +5,7 @@ import torch
 import wandb
 import shutil
 import torchvision
+import SimpleITK as sitk
 import pytorch_lightning as pl
 
 from packaging import version
@@ -17,61 +18,18 @@ from queue import Queue
 from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
-from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.utilities.distributed import rank_zero_only
 from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.data.base import Txt2ImgIterableBaseDataset
-from ldm.util import instantiate_from_config
+from ldm.util import instantiate_from_config, get_obj_from_str
+from inference.utils import TwoStreamBatchSampler, image_logger
 from einops import rearrange
-from scipy.ndimage import sobel
-from collections import namedtuple
 
 
 def default(x, defval=None):
     return x if x is not None else defval
-
-
-def combine_mask_and_im(x, overlay_coef=0.2):
-    # b 2 h w (d)
-    if len(x.shape) == 5: ndim = 3
-    if len(x.shape) == 4: ndim = 2
-    def find_mask_boundaries_nd(im, mask, color):
-        boundaries = torch.zeros_like(mask)
-        for i in range(1, 12):
-            m = (mask == i).numpy()
-            sobel_x = sobel(m, axis=1, mode='constant')
-            sobel_y = sobel(m, axis=2, mode='constant')
-            if ndim == 3:
-                sobel_z = sobel(m, axis=3, mode='constant')
-
-            boundaries = torch.from_numpy((np.abs(sobel_x) + np.abs(sobel_y) + (0 if ndim == 2 else np.abs(sobel_z))) * i) * (boundaries == 0) + boundaries * (boundaries != 0)
-        im = color[boundaries.long()] * (boundaries[..., None] > 0) + im * (boundaries[..., None] == 0)
-        return im
-    
-    image, mask = 255 * x[:, 0, ..., None].clamp(0, 1).repeat(*([1] * (ndim+1)), 3),\
-        x[:, 1] * 12
-    mask[mask == 255] = 11
-    OrganClass = namedtuple("OrganClass", ["label_name", "totalseg_id", "color"])
-    abd_organ_classes = [
-        OrganClass("unlabeled", 0, (0, 0, 0)),
-        OrganClass("spleen", 1, (0, 80, 100)),
-        OrganClass("kidney_left", 2, (119, 11, 32)),
-        OrganClass("kidney_right", 3, (119, 11, 32)),
-        OrganClass("liver", 5, (250, 170, 30)),
-        OrganClass("stomach", 6, (220, 220, 0)),
-        OrganClass("pancreas", 10, (107, 142, 35)),
-        OrganClass("small_bowel", 55, (255, 0, 0)),
-        OrganClass("duodenum", 56, (70, 130, 180)),
-        OrganClass("colon", 57, (0, 0, 255)),
-        OrganClass("urinary_bladder", 104, (0, 255, 255)),
-        OrganClass("colorectal_cancer", 255, (0, 255, 0))
-    ]
-    colors = torch.from_numpy(np.array([a.color for a in abd_organ_classes]))
-    colored_mask = (colors[mask.long()] * (mask[..., None] > 0) + image * (mask[..., None] == 0))
-    colored_im = colored_mask * overlay_coef + image * (1-overlay_coef)
-    colored_im = rearrange(find_mask_boundaries_nd(colored_im, mask, colors), "b ... c -> b c ...")
-    return colored_im
 
 
 def get_parser(**parser_kwargs):
@@ -215,7 +173,7 @@ def worker_init_fn(_):
 class DataModuleFromConfig(pl.LightningDataModule):
     def __init__(self, batch_size, train=None, validation=None, test=None, predict=None,
                  wrap=False, num_workers=None, shuffle_test_loader=False, use_worker_init_fn=False,
-                 shuffle_val_dataloader=False):
+                 shuffle_val_dataloader=False, train_sampler=None):
         super().__init__()
         self.batch_size = batch_size
         self.dataset_configs = dict()
@@ -234,6 +192,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
             self.dataset_configs["predict"] = predict
             self.predict_dataloader = self._predict_dataloader
         self.wrap = wrap
+        self.train_sampler = train_sampler
 
     def prepare_data(self):
         for data_cfg in self.dataset_configs.values():
@@ -248,14 +207,29 @@ class DataModuleFromConfig(pl.LightningDataModule):
                 self.datasets[k] = WrappedDataset(self.datasets[k])
 
     def _train_dataloader(self):
+        has_batch_sampler = False
+        if self.train_sampler is not None:
+            sampler = get_obj_from_str(self.train_sampler["target"])
+            if sampler == TwoStreamBatchSampler:
+                has_batch_sampler = True
+                self.train_sampler = sampler(primary_indices=self.datasets["train"].fine_labeled_indices, 
+                                            secondary_indices=self.datasets["train"].coarse_labeled_indices,
+                                            batch_size=self.batch_size,
+                                            secondary_batch_size=self.batch_size-1)
+                
         is_iterable_dataset = isinstance(self.datasets['train'], Txt2ImgIterableBaseDataset)
         if is_iterable_dataset or self.use_worker_init_fn:
             init_fn = worker_init_fn
         else:
             init_fn = None
-        return DataLoader(self.datasets["train"], batch_size=self.batch_size,
-                          num_workers=self.num_workers, shuffle=False if is_iterable_dataset else True,
-                          worker_init_fn=init_fn, collate_fn=getattr(self.datasets["train"], "collate", _utils.collate.default_collate))
+        train_dataloader = partial(DataLoader, 
+                                   dataset=self.datasets["train"],
+                                   num_workers=self.num_workers,
+                                   worker_init_fn=init_fn,
+                                   shuffle=False if is_iterable_dataset or has_batch_sampler else True,
+                                   collate_fn=getattr(self.datasets["train"], "collate", _utils.collate.default_collate),)
+        if not has_batch_sampler: return train_dataloader(batch_size=self.batch_size)
+        else: return train_dataloader(batch_sampler=self.train_sampler)
 
     def _val_dataloader(self, shuffle=False, batch_size=None):
         if isinstance(self.datasets['validation'], Txt2ImgIterableBaseDataset) or self.use_worker_init_fn:
@@ -266,10 +240,11 @@ class DataModuleFromConfig(pl.LightningDataModule):
                           batch_size=self.batch_size if batch_size is None else batch_size,
                           num_workers=self.num_workers,
                           worker_init_fn=init_fn,
-                          shuffle=shuffle, collate_fn=getattr(self.datasets["validation"], "collate", _utils.collate.default_collate))
+                          shuffle=shuffle, 
+                          collate_fn=getattr(self.datasets["validation"], "collate", _utils.collate.default_collate))
 
     def _test_dataloader(self, shuffle=False):
-        is_iterable_dataset = isinstance(self.datasets['train'], Txt2ImgIterableBaseDataset)
+        is_iterable_dataset = isinstance(self.datasets['test'], Txt2ImgIterableBaseDataset)
         if is_iterable_dataset or self.use_worker_init_fn:
             init_fn = worker_init_fn
         else:
@@ -342,16 +317,16 @@ class SetupCallback(Callback):
 
 
 class ImageLogger(Callback):
-    def __init__(self, train_batch_frequency, max_images, val_batch_frequency=None, clamp=True, increase_log_steps=True,
-                 rescale=True, disabled=False, log_on_batch_idx=True, log_first_step=False,
-                 log_images_kwargs=None, save_num=30, rescale_fn=None, logger=None):
+    def __init__(self, train_batch_frequency, max_images, val_batch_frequency=None, clamp=False,
+                 disabled=False, log_on_batch_idx=True, log_first_step=False,
+                 log_images_kwargs=None, save_num=30, log_nifti=False, logger=None, log_separate=False):
         super().__init__()
-        self.rescale = rescale
         self.batch_freq_tr = train_batch_frequency
         self.batch_freq_val = default(val_batch_frequency, train_batch_frequency)
         self.max_images = max_images
         self.logger_log_images = {
-            WandbLogger: self._wandb
+            WandbLogger: self._wandb,
+            TensorBoardLogger: self._board
         }
         self.log_steps_tr = [2 ** n for n in range(int(np.log2(self.batch_freq_tr)) + 1)]
         self.log_steps_val = [2 ** n for n in range(int(np.log2(self.batch_freq_val)) + 1)]
@@ -360,13 +335,19 @@ class ImageLogger(Callback):
         self.log_on_batch_idx = log_on_batch_idx
         self.log_images_kwargs = log_images_kwargs if log_images_kwargs else {}
         self.log_first_step = log_first_step
-        self.keep_queue = Queue(save_num)
+        self.log_separate = log_separate
         
         def _get_logger(target, params):
             if target == "mask_rescale":
-                return lambda x: x * params.get("n_mask")
+                return lambda x: x * 1 / (params.get("n_mask") - 1)
             if target == "image_rescale":
-                return lambda x: x
+                return lambda x: (x - x.min()) / (x.max() - x.min())
+        
+        self.log_nifti = log_nifti
+        if self.log_nifti: 
+            save_num = save_num * 2
+            self.nifti_logger = lambda x, p: sitk.WriteImage(sitk.GetImageFromArray(x), p)
+        self.keep_queue = Queue(save_num)
         
         self.logger = {}
         for name, val in logger.items():
@@ -377,6 +358,13 @@ class ImageLogger(Callback):
         for k in images:
             _im = images[k]
             pl_module.logger.experiment.log({f"{split}_{k}": [wandb.Image(_im)]})
+            
+    @rank_zero_only
+    def _board(self, pl_module, images, batch_idx, split):
+        # for k in images:
+        #     _im = images[k]
+        #     pl_module.logger.experiment.add_image(f"{split}_{k}", _im, batch_idx)
+        ...
             
     @staticmethod
     def _maybe_mkdir(path):
@@ -393,39 +381,24 @@ class ImageLogger(Callback):
     @rank_zero_only
     def log_local(self, save_dir, split, images, global_step, current_epoch, batch_idx):
         root = os.path.join(save_dir, "images", split)
-        local_images = {}
-        for k in images:
-            _im = images[k].contiguous()
-            if len(_im.shape) == 5: 
-                step = max(_im.shape[2] // 10, 1)  # at most save 10 slices
-                _im = rearrange(_im[:, 0:1, ::step], "b c d w h -> (b d) c w h")
-            grid = torchvision.utils.make_grid(rearrange(_im, "b c h w -> (b c) 1 h w"))
-            ### force rescale conditioning:
-            # if k == "conditioning":
-            #     if _im.shape[1] == 2:
-            #         grid = torchvision.utils.make_grid(combine_mask_and_im(_im))
-            # if self.rescale:
-            #     grid = self.rescale_fn(grid)  # -1,1 -> 0,1; c,h,w
-            grid = self.logger.get(k, lambda x: x)(grid)
-            grid = rearrange(grid, "c h w -> h w c")
-            grid = grid.numpy()
-            if grid.min() >= 0 and grid.max() <= 1:
-                grid = (grid * 255).astype(np.uint8)
-            else:
-                grid = ((grid - grid.min()) / (grid.max() - grid.min()) * 255).astype(np.uint8)
-            filename = "{}_gs-{:06}_e-{:06}_b-{:06}.png".format(
-                k,
+        self._maybe_mkdir(root)
+        filename = "gs-{:06}_e-{:06}_b-{:06}.png".format(
                 global_step,
                 current_epoch,
                 batch_idx)
-            path = os.path.join(root, k, filename)
-            if not os.path.exists(os.path.split(path)[0]):
-                os.makedirs(os.path.split(path)[0], exist_ok=True)
-            self._maybe_mkdir(os.path.split(path)[0])
-            im = Image.fromarray(grid)
-            local_images[k] = im
-            im.save(path)
-            self._enqueue_and_dequeue(path)
+        path = os.path.join(root, filename)
+        if self.log_separate:
+            path = lambda x: os.path.join(self._maybe_mkdir(os.path.join(root, x)), filename)
+            local_images = image_logger(images, path, n_grid_images=16, log_separate=True)
+        else:
+            local_images = {"main": image_logger(images, path, n_grid_images=16, log_separate=False)}
+        
+        if self.log_nifti:
+            for k in images:
+                if isinstance(k, torch.Tensor) and k in ["samples"]:
+                    _im = images[k].contiguous()
+                    nifti_logger = partial(self.nifti_logger, x=_im[0, 0])
+                    nifti_logger(p=path.replace(".png", f"_{k}.nii.gz"))
         return local_images
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):
@@ -455,7 +428,7 @@ class ImageLogger(Callback):
                                           pl_module.global_step, pl_module.current_epoch, batch_idx)
 
             logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
-            logger_log_images(pl_module, local_images, pl_module.global_step, split)
+            logger_log_images(pl_module, local_images, batch_idx, split)
 
             if is_train:
                 pl_module.train()
@@ -551,7 +524,6 @@ if __name__ == "__main__":
     #               key: value
 
     # now = datetime.datetime.now().strftime("%Y-%m-%d")
-    now = "static"
 
     # add cwd for convenience and to make classes in this file available when
     # running as `python main.py`
@@ -589,14 +561,14 @@ if __name__ == "__main__":
         nowname = _tmp[-1]
     else:
         if opt.name:
-            name = "_" + opt.name
+            name = opt.name
         elif opt.base:
             cfg_fname = os.path.split(opt.base[0])[-1]
             cfg_name = os.path.splitext(cfg_fname)[0]
-            name = "_" + cfg_name
+            name = cfg_name
         else:
             name = ""
-        nowname = now + name + opt.postfix
+        nowname = name + opt.postfix
         logdir = os.path.join(opt.logdir, nowname)
 
     ckptdir = os.path.join(logdir, "checkpoints")
@@ -646,8 +618,16 @@ if __name__ == "__main__":
                     "id": nowname,
                 }
             },
+            "tensorboard": {
+                "target": "pytorch_lightning.loggers.TensorBoardLogger",
+                "params": {
+                    "save_dir": logdir,
+                    "name": nowname,
+                    "version": "tensorboard",
+                }
+            }
         }
-        default_logger_cfg = default_logger_cfgs["wandb"]
+        default_logger_cfg = default_logger_cfgs["wandb"] if not opt.debug else default_logger_cfgs["tensorboard"]
         if "logger" in lightning_config:
             logger_cfg = lightning_config.logger
         else:
@@ -686,7 +666,7 @@ if __name__ == "__main__":
                 "target": "main.SetupCallback",
                 "params": {
                     "resume": opt.resume,
-                    "now": now,
+                    "now": datetime.datetime.now().strftime("%Y%m%d"),
                     "logdir": logdir,
                     "ckptdir": ckptdir,
                     "cfgdir": cfgdir,
@@ -698,10 +678,7 @@ if __name__ == "__main__":
                 "target": "main.ImageLogger",
                 "params": {
                     "train_batch_frequency": 750,
-                    "max_images": 4,
-                    "clamp": True,
-                    "rescale": False,
-                    "rescale_fn": "clamp",
+                    "max_images": 40,
                 }
             },
             "learning_rate_logger": {
@@ -816,19 +793,19 @@ if __name__ == "__main__":
         if not opt.no_test and not trainer.interrupted:
             trainer.test(model, data)
     except Exception:
-        if opt.debug and trainer.global_rank == 0:
-            try:
-                import pudb as debugger
-            except ImportError:
-                import pdb as debugger
-            debugger.post_mortem()
+        # if opt.debug and trainer.global_rank == 0:
+        #     try:
+        #         import pudb as debugger
+        #     except ImportError:
+        #         import pdb as debugger
+        #     debugger.post_mortem()
         raise
     finally:
         # move newly created debug project to debug_runs
-        if opt.debug and not opt.resume and trainer.global_rank == 0:
-            dst, name = os.path.split(logdir)
-            dst = os.path.join(dst, "debug_runs", name)
-            os.makedirs(os.path.split(dst)[0], exist_ok=True)
-            os.rename(logdir, dst)
+        # if opt.debug and not opt.resume and trainer.global_rank == 0:
+        #     dst, name = os.path.split(logdir)
+        #     dst = os.path.join(dst, "debug_runs", name)
+        #     os.makedirs(os.path.split(dst)[0], exist_ok=True)
+        #     os.rename(logdir, dst)
         if trainer.global_rank == 0:
             print(trainer.profiler.summary())

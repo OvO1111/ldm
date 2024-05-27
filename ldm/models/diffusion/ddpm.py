@@ -1254,7 +1254,7 @@ class LatentDiffusion(DDPM):
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=4, sample=True, ddim_steps=200, ddim_eta=1., return_keys=None,
                    quantize_denoised=True, inpaint=False, plot_denoise_rows=False, plot_progressive_rows=False,
-                   plot_diffusion_rows=False, **kwargs):
+                   plot_diffusion_rows=False, verbose=False, **kwargs):
 
         use_ddim = ddim_steps is not None
 
@@ -1431,11 +1431,15 @@ class DiffusionWrapper(pl.LightningModule):
 class Img2MaskDiffusion(LatentDiffusion):
     def __init__(self, image_key, mask_key,
                  vae_decoder_trainable=False,
+                 vae_decoder_config=None,
                  *args, **kwargs):
         assert image_key != mask_key
         self.mask_key = mask_key
         self.training_vae_decoder = vae_decoder_trainable
+        self.vae_decoder_config = vae_decoder_config
         super().__init__(first_stage_key=image_key, *args, **kwargs)
+        if self.training_vae_decoder:
+            self.decoder = instantiate_from_config(self.vae_decoder_config)
         
     def shared_step(self, batch, **kwargs):
         x, c = self.get_input(batch, self.first_stage_key)
@@ -1444,19 +1448,41 @@ class Img2MaskDiffusion(LatentDiffusion):
         cf = None if not self.first_stage_model.is_conditional else super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key)
         encoder_posterior = self.encode_first_stage(mx, cf)
         mz = self.get_first_stage_encoding(encoder_posterior).detach()
-        loss = self(x, c, mz)
+        if not self.training_vae_decoder: 
+            loss = self(x, c, mz)
+        else:
+            loss = self(x, c, mz, m=mx[:, 0].long(), cf=cf)
         return loss
     
-    def forward(self, x, c, mx, *args, **kwargs):
+    def dice_loss(self, pred, gt):
+        if pred.ndim != gt.ndim: 
+            gt = rearrange(nn.functional.one_hot(gt, num_classes=pred.shape[1]), "b ... c -> b c ...")
+        loss = 0.
+        smooth = 1e-5
+        if not torch.all(pred.sum(1) == 1):
+            pred = nn.functional.softmax(pred, dim=1)
+        for i in range(pred.shape[1]):
+            loss += 1 - (2 * (pred * gt).sum() + smooth) / (pred.sum() + gt.sum() + smooth) / pred.shape[0]
+        return loss / pred.shape[1]
+    
+    def forward(self, x, c, mx, m=None, cf=None, *args, **kwargs):
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
         if self.model.conditioning_key is not None:
             assert c is not None
             if self.cond_stage_trainable:
                 c = self.get_learned_conditioning(c)
-            if self.shorten_cond_schedule:  # TODO: drop this option
-                tc = self.cond_ids[t].to(self.device)
-                c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
-        return self.p_losses(x, c, mx, t, *args, **kwargs)
+            # if self.shorten_cond_schedule:  # TODO: drop this option
+            #     tc = self.cond_ids[t].to(self.device)
+            #     c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
+        loss, loss_dict, model_output = self.p_losses(x, c, mx, t, *args, **kwargs)
+        if self.training_vae_decoder:
+            model_output_dec = self.decoder(model_output, {f"c_{self.model.conditioning_key}": cf})
+            seg_loss_ce = nn.functional.cross_entropy(model_output_dec, m)
+            seg_loss_dice = self.dice_loss(model_output_dec, m)
+            seg_loss = .5 * seg_loss_ce + .5 * seg_loss_dice
+            loss = loss + seg_loss * 10
+            loss_dict.update({f"{'train' if self.training else 'val'}/loss_seghead": seg_loss})
+        return loss, loss_dict
     
     def p_losses(self, x_start, cond, desired_x_out, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
@@ -1484,9 +1510,8 @@ class Img2MaskDiffusion(LatentDiffusion):
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
         loss += (self.original_elbo_weight * loss_vlb)
-        loss_dict.update({f'{prefix}/loss': loss})
 
-        return loss, loss_dict
+        return loss, loss_dict, model_output
     
     def configure_optimizers(self):
         lr = self.learning_rate
@@ -1496,7 +1521,7 @@ class Img2MaskDiffusion(LatentDiffusion):
             params = params + list(self.cond_stage_model.parameters())
         if self.training_vae_decoder:
             print(f"{self.__class__.__name__}: Also optimizing first_stage_decoder params!")
-            params = params + list(self.first_stage_model.decoder.parameters())
+            params = params + list(self.decoder.parameters())
         if self.learn_logvar:
             print('Diffusion model optimizing logvar')
             params.append(self.logvar)
@@ -1514,3 +1539,113 @@ class Img2MaskDiffusion(LatentDiffusion):
                 }]
             return [opt], scheduler
         return opt
+    
+    @torch.no_grad()
+    def decode_mask(self, z, c=None, predict_cids=False, force_not_quantize=False):
+        if not self.training_vae_decoder:
+            return super().decode_first_stage(z, c, predict_cids, force_not_quantize)
+        return self.decoder(z, {f"c_{self.model.conditioning_key}": c})
+    
+    @torch.no_grad()
+    def log_images(self, batch, *args, **kwargs):
+        log = super().log_images(batch, *args, **kwargs)
+        
+        mx = super(LatentDiffusion, self).get_input(batch, self.mask_key)
+        mx = repeat(mx, "b c ... -> b (repeat c) ...", repeat=self.first_stage_model.encoder.in_channels)
+        cf = None if not self.first_stage_model.is_conditional else super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key)
+        encoder_posterior = self.encode_first_stage(mx, cf)
+        mz = self.get_first_stage_encoding(encoder_posterior).detach()
+        mxrec = self.decode_mask(mz, cf).argmax(1, keepdim=True)
+        log["mask"] = mx[:, 0:1]
+        log["recovered_mask"] = mxrec
+        log["samples"] = log["samples"].argmax(1, keepdim=True)
+        return log
+    
+    
+    
+class CoarseAndFineDiffusion(LatentDiffusion):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+    @staticmethod
+    def _get_foreground_bbox(tensor, use_shape_on_background=False):
+        cropped = []
+        for it, t in enumerate(tensor):
+            # c h w d
+            if torch.any(t):
+                crop_x = torch.where(torch.any(torch.any(t, dim=2), dim=2))[1][[0, -1]]
+                crop_y = torch.where(torch.any(torch.any(t, dim=1), dim=2))[1][[0, -1]]
+                crop_z = torch.where(torch.any(torch.any(t, dim=1), dim=1))[1][[0, -1]]
+                cropped.append([slice(it, it + 1), slice(None, None),
+                                slice(crop_x[0], crop_x[1] + 1),
+                                slice(crop_y[0], crop_y[1] + 1),
+                                slice(crop_z[0], crop_z[1] + 1)])
+            else:
+                if use_shape_on_background: cropped.append(None)
+                else: cropped.append([slice(0, t.shape[i] + 1) for i in range(len(t.shape))])
+        return cropped
+    
+    @staticmethod
+    def _interpolate(tensor, *args, **kwargs):
+        mode = kwargs.get("mode", "nearest")
+        if mode == "nearest":
+            kwargs["mode"] = "trilinear"
+            return nn.functional.interpolate(tensor, align_corners=True, *args, **kwargs).round()
+        return nn.functional.interpolate(tensor, *args, **kwargs)
+        
+    @torch.no_grad()
+    def log_images(self, batch, *args, **kwargs):
+        logs = dict()
+        z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key,
+                                        return_first_stage_outputs=True,
+                                        force_c_encode=True,
+                                        return_original_cond=True,)
+        logs["inputs"] = x
+        logs["reconstruction"] = xrec
+        b, *shp = x.shape
+        
+        assert b > 1
+        alpha = kwargs.get("mixup_ratio", .5)
+        eta = kwargs.get("ddim_eta", 1)
+        sample = kwargs.get("sample", True)
+        ddim_steps = kwargs.get("ddim_steps", 200)
+        use_ddim = kwargs.get("ddim_steps", 200) is not None
+        # strictly only the first item is finely labeled, while the rest are not
+        cf = None if not self.first_stage_model.is_conditional else super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key)
+        
+        if sample:
+            samples, _ = self.sample_log(cond=c, batch_size=b, ddim=use_ddim, ddim_steps=ddim_steps, eta=eta)
+            logs["samples"] = self.decode_first_stage(samples, cf)
+            
+            z_fine = samples[0:1]
+            z_coarse = samples[1:]
+            # convert mask shape to match latent shape
+            mask_fine = self._interpolate((cf[0:1] > 0).to(torch.float32), z_fine.shape[2:], mode="nearest")
+            mask_coarse = self._interpolate((cf[1:] > 0).to(torch.float32), z_coarse.shape[2:], mode="nearest")
+            # crop foreground region
+            z_fine_masked_cropped = self._get_foreground_bbox(mask_fine)
+            z_coarse_masked_cropped = self._get_foreground_bbox(mask_coarse, use_shape_on_background=True)
+            # resize fine foregrounds to coarse's size
+            z_fine_reshaped, mask_fine_reshaped = [], []
+            for i in range(b - 1):
+                if z_fine_masked_cropped[0] is not None and z_coarse_masked_cropped[i] is not None:
+                    z_fine_reshaped.append(self._interpolate(z_fine[*z_fine_masked_cropped[0]], z_coarse[*z_coarse_masked_cropped[i]].shape[2:], mode="trilinear"))
+                    mask_fine_reshaped.append(self._interpolate(mask_fine[*z_fine_masked_cropped[0]], mask_coarse[*z_coarse_masked_cropped[i]].shape[2:], mode="nearest"))
+                else:
+                    if z_coarse_masked_cropped[i] is None:
+                        z_coarse_masked_cropped[i] = [slice(0, z_coarse[i].shape[j] + 1) for j in range(len(z_coarse[i].shape))]
+                    z_fine_reshaped.append(z_coarse[*z_coarse_masked_cropped[i]])
+                    mask_fine_reshaped.append(mask_coarse[*z_coarse_masked_cropped[i]])
+            # mixup
+            z_local_mix = [z_fine_reshaped[i] * (1 - alpha) + z_coarse[*z_coarse_masked_cropped[i]] * alpha for i in range(b - 1)]
+            mask_local_mix = [mask_fine_reshaped[i] * (1 - alpha) + mask_coarse[*z_coarse_masked_cropped[i]] * alpha for i in range(b - 1)]
+            for i in range(b - 1): z_coarse[i, *z_coarse_masked_cropped[i][1:]] = z_local_mix[i]
+            for i in range(b - 1): mask_coarse[i, *z_coarse_masked_cropped[i][1:]] = mask_local_mix[i]
+            z_mix = torch.cat([z_fine, z_coarse], dim=0)
+            mask_mix = torch.cat([mask_fine, mask_coarse], dim=0)
+            
+            x_samples = self.decode_first_stage(z_mix, cf)
+            logs["samples_mixed"] = x_samples
+            logs["mask_mixed"] = mask_mix
+            
+        return logs
