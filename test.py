@@ -154,7 +154,7 @@ class ImageLogger(Callback):
             path = lambda x: os.path.join(self._maybe_mkdir(os.path.join(root, x)), filename)
             local_images = image_logger(images, path, n_grid_images=16, log_separate=True, **self.logger)
         else:
-            local_images = {"main": image_logger(images, path, n_grid_images=16, log_separate=False, **self.logger)}
+            local_images = image_logger(images, path, n_grid_images=16, log_separate=False, **self.logger)
         
         if self.log_nifti:
             for k in images:

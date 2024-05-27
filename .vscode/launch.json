@@ -9,7 +9,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/autoencoder/brats2021_3d_ae_kl.yaml", "-t", "--gpus", "0,", "--name", "test"],
+            "args": ["-b", "./configs/autoencoder/brats2021_3d_cvae_kl.yaml", "-t", "--gpus", "0,", "--name", "test"],
             "console": "integratedTerminal"
         },
         {
@@ -17,7 +17,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm_c2f.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
+            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {
@@ -25,7 +25,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./test.py",
-            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm_test.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
+            "args": ["-b", "./configs/latent-diffusion/ruijin_3d_ldm_test.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {

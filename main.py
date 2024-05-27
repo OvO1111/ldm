@@ -1,10 +1,9 @@
-import argparse, os, sys, datetime, glob, importlib, csv, re
+import argparse, os, sys, datetime, glob, re
 import numpy as np
 import time
 import torch
 import wandb
 import shutil
-import torchvision
 import SimpleITK as sitk
 import pytorch_lightning as pl
 
@@ -25,7 +24,6 @@ from pytorch_lightning.utilities import rank_zero_info
 from ldm.data.base import Txt2ImgIterableBaseDataset
 from ldm.util import instantiate_from_config, get_obj_from_str
 from inference.utils import TwoStreamBatchSampler, image_logger
-from einops import rearrange
 
 
 def default(x, defval=None):
@@ -361,10 +359,9 @@ class ImageLogger(Callback):
             
     @rank_zero_only
     def _board(self, pl_module, images, batch_idx, split):
-        # for k in images:
-        #     _im = images[k]
-        #     pl_module.logger.experiment.add_image(f"{split}_{k}", _im, batch_idx)
-        ...
+        for k in images:
+            _im = images[k]
+            pl_module.logger.experiment.add_image(f"{split}_{k}", _im.transpose(2, 0, 1), batch_idx)
             
     @staticmethod
     def _maybe_mkdir(path):
@@ -391,7 +388,7 @@ class ImageLogger(Callback):
             path = lambda x: os.path.join(self._maybe_mkdir(os.path.join(root, x)), filename)
             local_images = image_logger(images, path, n_grid_images=16, log_separate=True)
         else:
-            local_images = {"main": image_logger(images, path, n_grid_images=16, log_separate=False)}
+            local_images = image_logger(images, path, n_grid_images=16, log_separate=False)
         
         if self.log_nifti:
             for k in images:

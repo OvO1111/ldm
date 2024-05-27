@@ -1,6 +1,6 @@
 model:
   base_learning_rate: 2.0e-06
-  target: inference.sampler.InferLatentDiffusion
+  target: inference.ddpm.InferLatentDiffusion
   params:
     linear_start: 0.0015
     linear_end: 0.0195
@@ -70,7 +70,6 @@ model:
         attn_type: vanilla
         use_checkpoint: True  # always use ckpt
 
-    test_scheme: normal
     eval_scheme: [1, 3]
 
 data:
@@ -79,12 +78,11 @@ data:
     batch_size: 1
     num_workers: 5
     wrap: false
-    batch_sampler:
-      target: inference.utils.TwoStreamBatchSampler
     test:
       target: ldm.data.ruijin.Ruijin_3D
       params:
         split: test
+        resize_to: [64, 128, 128]
 
 lightning:
   callbacks:

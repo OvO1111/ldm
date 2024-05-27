@@ -1,6 +1,6 @@
 model:
   base_learning_rate: 2.0e-05
-  target: inference.sampler.InferLatentDiffusion
+  target: inference.ddpm.InferLatentDiffusion
   params:
     linear_start: 0.0015
     linear_end: 0.0195
@@ -10,7 +10,7 @@ model:
     first_stage_key: image
     cond_stage_key: mask
     conditioning_key: concat
-    image_size: [8, 8, 8]  # after first-stage encoding
+    image_size: [16, 16, 16]  # after first-stage encoding
     channels: 4  # after first-stage encoding
     monitor: val/loss_simple_ema
     cond_stage_trainable: false
@@ -45,7 +45,7 @@ model:
         ddconfig:
           double_z: True
           z_channels: 4
-          resolution: [64, 64, 64]
+          resolution: [128, 128, 128]
           in_channels: 4
           condition_channels: 1
           out_ch: 4
@@ -62,7 +62,7 @@ model:
       params:
         double_z: True
         z_channels: 4
-        resolution: [64, 64, 64]
+        resolution: [128, 128, 128]
         in_channels: 1
         out_ch: 4
         ch: 96
@@ -86,7 +86,7 @@ data:
       target: ldm.data.brats2021.BraTS2021_3D
       params:
         split: test
-        crop_to: [64, 64, 64]
+        crop_to: [128, 128, 128]
 
 lightning:
   callbacks:
