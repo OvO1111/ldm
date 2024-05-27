@@ -156,8 +156,9 @@ def image_logger(dict_of_images, path, n_labels=11, n_grid_images=8, log_separat
             if isinstance(v, np.ndarray):
                 ax.imshow(rearrange(v, "c h w -> h w c"))
             if isinstance(v, str):
+                linewidth = 50
                 ax.imshow(np.zeros((5, 10)))
-                ax.text(0, 0, "\n".join([v[i * 20: (i + 1) * 20] for i in range(np.ceil(len(v) / 20).astype(int))]),
+                ax.text(0, 0, "\n".join([v[i * linewidth: (i + 1) * linewidth] for i in range(np.ceil(len(v) / linewidth).astype(int))]),
                         color="white",
                         fontproperties=matplotlib.font_manager.FontProperties(size=5,
                                                                                 fname='/ailab/user/dailinrui/data/dependency/Arial-Unicode-Bold.ttf'))

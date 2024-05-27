@@ -61,7 +61,7 @@ class BraTS2021_3D(Dataset):
         item = self.load_fn(self.split_keys[idx])
         image, mask = map(lambda x: item[x][:], ["image", "label"])
         
-        subject = tio.Subject(image=tio.ScalarImage(tensor=image), coarse=tio.ScalarImage(tensor=(mask > 1).astype(np.float32)[None]), fine=tio.ScalarImage(tensor=mask[None]),)
+        subject = tio.Subject(image=tio.ScalarImage(tensor=image), coarse=tio.ScalarImage(tensor=(mask >= 1).astype(np.float32)[None]), fine=tio.ScalarImage(tensor=mask[None]),)
         # crop
         subject = self.transforms["crop"](subject)
         # normalize

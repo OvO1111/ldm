@@ -303,7 +303,7 @@ if __name__ == "__main__":
             "tensorboard": {
                 "target": "pytorch_lightning.loggers.TensorBoardLogger",
                 "params": {
-                    "save_dir": logdir,
+                    "save_dir": os.path.dirname(logdir),
                     "name": nowname,
                     "version": "tensorboard",
                 }

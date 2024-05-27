@@ -1,3 +1,5 @@
+3D version of "High-Resolution Image Synthesis with Latent Diffusion Models" or "Stable Diffusion"
+
 # Train command
 `torchrun --nproc_per_node $N_GPU main.py --base $CFG_FILE -t --name $EXP_NAME --gpus 0,1...`
 
@@ -109,8 +111,8 @@ data:
 
 
 # Inference command
-`python inference/sample.py -r $MODEL_CKPT --batch_size 1` 
-- the `batch_size 1` is mandatory as per my use cases
+`python test.py --base $CFG_FILE --name $EXP_NAME --gpus 0,` 
+- CFG_FILE is specified like that in training cmd, the images and files will be stored under `<path_to_$EXP_NAME>/images/test`
 
 # References
 Refer to the following directories for more details

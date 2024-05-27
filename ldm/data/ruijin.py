@@ -14,7 +14,8 @@ from ldm.data.utils import conserve_only_certain_labels, identity, window_norm, 
 class Ruijin_3D(Dataset):
     def __init__(self, split="train", 
                 force_rewrite_split=True, 
-                resize_to=(64, 128, 128)):
+                resize_to=(64, 128, 128),
+                max_size=None):
         super().__init__()
         with open('/ailab/user/dailinrui/data/records/dataset_crc_v2.json', 'rt') as f:
             self.data = json.load(f)
@@ -42,7 +43,7 @@ class Ruijin_3D(Dataset):
                                                                              force_rewrite_split,
                                                                              train=self.train_keys, 
                                                                              val=self.val_keys, test=self.test_keys)
-        self.split_keys = getattr(self, f"{split}_keys")
+        self.split_keys = getattr(self, f"{split}_keys")[slice(0, max_size)]
 
     def __len__(self):
         return len(self.split_keys)
