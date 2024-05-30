@@ -316,8 +316,8 @@ class SetupCallback(Callback):
 
 class ImageLogger(Callback):
     def __init__(self, train_batch_frequency, max_images, val_batch_frequency=None, clamp=False,
-                 disabled=False, log_on_batch_idx=True, log_first_step=False,
-                 log_images_kwargs=None, save_num=30, log_nifti=False, logger=None, log_separate=False):
+                 disabled=False, log_on_batch_idx=True, log_first_step=True,
+                 log_images_kwargs=None, log_nifti=False, logger=None, log_separate=False):
         super().__init__()
         self.batch_freq_tr = train_batch_frequency
         self.batch_freq_val = default(val_batch_frequency, train_batch_frequency)
@@ -343,9 +343,10 @@ class ImageLogger(Callback):
         
         self.log_nifti = log_nifti
         if self.log_nifti: 
-            save_num = save_num * 2
+            self.max_images = self.max_images * 2
             self.nifti_logger = lambda x, p: sitk.WriteImage(sitk.GetImageFromArray(x), p)
-        self.keep_queue = Queue(save_num)
+        self.keep_queue_tr = Queue(self.max_images)
+        self.keep_queue_val = Queue(self.max_images)
         
         self.logger = {}
         for name, val in logger.items():
@@ -369,11 +370,12 @@ class ImageLogger(Callback):
             os.makedirs(path, exist_ok=True)
         return path
     
-    def _enqueue_and_dequeue(self, entry):
-        if self.keep_queue.full():
-            to_remove = self.keep_queue.get_nowait()
+    def _enqueue_and_dequeue(self, entry, split="train"):
+        keep_q = self.keep_queue_tr if split == "train" else self.keep_queue_val
+        if keep_q.full():
+            to_remove = keep_q.get_nowait()
             os.remove(to_remove)
-        self.keep_queue.put_nowait(entry)
+        keep_q.put_nowait(entry)
 
     @rank_zero_only
     def log_local(self, save_dir, split, images, global_step, current_epoch, batch_idx):
@@ -387,8 +389,10 @@ class ImageLogger(Callback):
         if self.log_separate:
             path = lambda x: os.path.join(self._maybe_mkdir(os.path.join(root, x)), filename)
             local_images = image_logger(images, path, n_grid_images=16, log_separate=True)
+            for k in local_images.keys(): self._enqueue_and_dequeue(path(k), split)
         else:
             local_images = image_logger(images, path, n_grid_images=16, log_separate=False)
+            self._enqueue_and_dequeue(path, split)
         
         if self.log_nifti:
             for k in images:
@@ -396,6 +400,7 @@ class ImageLogger(Callback):
                     _im = images[k].contiguous()
                     nifti_logger = partial(self.nifti_logger, x=_im[0, 0])
                     nifti_logger(p=path.replace(".png", f"_{k}.nii.gz"))
+                    self._enqueue_and_dequeue(path.replace(".png", f"_{k}.nii.gz"), split)
         return local_images
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):
@@ -414,8 +419,6 @@ class ImageLogger(Callback):
                 images = pl_module.log_images(batch, split=split, **self.log_images_kwargs)
 
             for k in images:
-                N = min(images[k].shape[0], self.max_images)
-                images[k] = images[k][:N]
                 if isinstance(images[k], torch.Tensor):
                     images[k] = images[k].detach().cpu()
                     if self.clamp:
@@ -435,11 +438,11 @@ class ImageLogger(Callback):
         batch_freq = self.batch_freq_tr if split == "train" else self.batch_freq_val
         if ((check_idx % batch_freq) == 0 or (check_idx in log_steps)) and (
                 check_idx > 0 or self.log_first_step):
-            try:
-                log_steps.pop(0)
-            except IndexError as e:
-                print(e)
-                pass
+            # try:
+            #     log_steps.pop(0)
+            # except IndexError as e:
+            #     print(e)
+            #     pass
             return True
         return False
 
@@ -618,7 +621,7 @@ if __name__ == "__main__":
             "tensorboard": {
                 "target": "pytorch_lightning.loggers.TensorBoardLogger",
                 "params": {
-                    "save_dir": os.path.dirname(logdir),
+                    "save_dir": logdir,
                     "name": nowname,
                     "version": "tensorboard",
                 }

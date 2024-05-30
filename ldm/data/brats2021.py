@@ -44,13 +44,15 @@ class BraTS2021_3D(Dataset):
 
         self.split = split
         base = "/ailab/group/pjlab-smarthealth03/transfers/dailinrui/data/dataset/BraTS2021" if not use_shm else "/dev/shm/BraTS2021"
-        with open(f"{base}/{split}.list") as fp:
-            self.split_keys = [os.path.join(f"{base}/data", _.strip()) for _ in fp.readlines()][:max_size]
+        
+        for spt in ["train", "val", "test"]:
+            with open(f"{base}/{spt}.list") as fp:
+                self.__dict__[f"{spt}_keys"] = [os.path.join(f"{base}/data", _.strip()) for _ in fp.readlines()]
+        else:
+            self.split_keys = getattr(self, f"{split}_keys")[:max_size]
             
         for broken_file in [os.path.join(f"{base}/data", _) for _ in ["BraTS2021_00000.h5"]]: self.split_keys.remove(broken_file) if broken_file in self.split_keys else 0
-            
-        self.datatypes = {"image": ["image"], "mask": ["coarse", "fine"], "text": []}
-        self.logger_kwargs = {"coarse": {"n": self.n_coarse}, "fine": {"n": self.n_fine}}
+        
         self.fine_labeled_indices = list(range(n_fine if n_fine is not None else len(self.split_keys)))
         self.coarse_labeled_indices = [i for i in range(len(self.split_keys)) if i not in self.fine_labeled_indices]
 
@@ -69,57 +71,9 @@ class BraTS2021_3D(Dataset):
         subject = self.transforms["normalize_mask"](subject)
         # random aug
         subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
-        subject = {k: v.data for k, v in subject.items()} | {"ids": idx, "mask": subject.fine.data if idx in self.fine_labeled_indices else subject.coarse.data}
+        subject = {k: v.data for k, v in subject.items()} | {"ids": idx, "mask": subject.fine.data if idx in self.fine_labeled_indices else subject.coarse.data, 'casename': self.split_keys[idx]}
 
         return subject
-    
-    def logger(self, log_path: str | os.PathLike, data: dict, global_step: int, current_epoch: int, batch_idx: int):
-        def _logger(image, n_slices=10, is_mask=False, **kwargs):
-            if len(image.shape) == 4:
-                b, h = image.shape[:2]
-                if h > n_slices: image = image[:, ::h // n_slices]
-                image = rearrange(image, "b h w d -> (b h) 1 w d")
-            image = make_grid(image, nrow=min(n_slices, h), normalize=not is_mask)
-
-            if is_mask:
-                n = kwargs.get("n")
-                cmap = cm.get_cmap("viridis")
-                rgb = torch.tensor([(0, 0, 0)] + [cmap(i)[:-1] for i in np.arange(0.1, n) / n], device=image.device)
-                colored_mask = rearrange(rgb[image][0], "i j n -> 1 n i j")
-                return colored_mask
-            else:
-                return image
-        
-        ind_vis = {}
-        for k, v in data.items():
-            if k in self.datatypes["image"] or k in self.datatypes["mask"]: 
-                ind_vis[str(k)] = _logger(v, k in self.datatypes["mask"], **self.logger_kwargs.get(k)).squeeze().data.cpu().numpy()
-            elif k in self.datatypes["text"]: ind_vis[str(k)] = v
-            
-        h = max([getattr(x, "shape", [0, 0, 0])[1] for x in ind_vis.values()])
-        w = sum([getattr(x, "shape", [0, 0, 0])[2] for x in ind_vis.values()])
-        fig = plt.figure(figsize=(minmax(w // 1024, 15, 30), minmax(h // 1024, 5, 10)))
-        for i, (k, v) in enumerate(ind_vis.items()):
-            ax = fig.add_subplot(1, len(data), i + 1)
-            ax.set_title(k)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            ax.xaxis.set_tick_params(labelbottom=False)
-            ax.yaxis.set_tick_params(labelleft=False)
-            if isinstance(v, np.ndarray):
-                ax.imshow(rearrange(v, "c h w -> h w c"))
-            if isinstance(v, str):
-                ax.imshow(np.zeros((10, 10)))
-                ax.text(0, 0, "\n".join([v[i * 20: (i + 1) * 20] for i in range(np.ceil(len(v) / 20).astype(int))]),
-                        color="white",
-                        fontproperties=matplotlib.font_manager.FontProperties(size=5,
-                                                                              fname='/ailab/user/dailinrui/data/dependency/Arial-Unicode-Bold.ttf'))
-        
-        plt.savefig(os.path.join(log_path, "{}_gs-{:06}_e-{:06}_b-{:06}.png".format(
-                global_step,
-                current_epoch,
-                batch_idx)), dpi=300, bbox_inches="tight", pad_inches=0)
-        plt.close()
         
     def verify_dataset(self):
         iterator = tqdm(range(len(self.split_keys)))

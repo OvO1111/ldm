@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch import nn, einsum
 from einops import rearrange, repeat
 
-from ldm.modules.diffusionmodules.util import checkpoint
+from ldm.modules.diffusionmodules.util import checkpoint, conv_nd
 
 
 def exists(val):
@@ -225,38 +225,42 @@ class SpatialTransformer(nn.Module):
     Finally, reshape to image
     """
     def __init__(self, in_channels, n_heads, d_head,
-                 depth=1, dropout=0., context_dim=None):
+                 depth=1, dropout=0., context_dim=None, dims=3, use_linear=False, use_checkpoint=True):
         super().__init__()
         self.in_channels = in_channels
         inner_dim = n_heads * d_head
         self.norm = Normalize(in_channels)
 
-        self.proj_in = nn.Conv2d(in_channels,
-                                 inner_dim,
-                                 kernel_size=1,
-                                 stride=1,
-                                 padding=0)
+        self.proj_in = conv_nd(dims,
+                               in_channels,
+                               inner_dim,
+                               kernel_size=1,
+                               stride=1,
+                               padding=0)
+        self.dims = dims
 
         self.transformer_blocks = nn.ModuleList(
-            [BasicTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim)
+            [BasicTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim, gated_ff=use_linear, checkpoint=use_checkpoint)
                 for d in range(depth)]
         )
 
-        self.proj_out = zero_module(nn.Conv2d(inner_dim,
-                                              in_channels,
-                                              kernel_size=1,
-                                              stride=1,
-                                              padding=0))
+        self.proj_out = zero_module(conv_nd(dims,
+                                            inner_dim,
+                                            in_channels,
+                                            kernel_size=1,
+                                            stride=1,
+                                            padding=0))
 
     def forward(self, x, context=None):
         # note: if no context is given, cross-attention defaults to self-attention
-        b, c, h, w = x.shape
+        b, c, *shp = x.shape
         x_in = x
         x = self.norm(x)
         x = self.proj_in(x)
-        x = rearrange(x, 'b c h w -> b (h w) c')
+        x = rearrange(x, 'b c ... -> b (...) c')
         for block in self.transformer_blocks:
             x = block(x, context=context)
-        x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
+        pattern = "b (h w d) c -> b c h w d" if self.dims == 3 else "b (h w) c -> b c h w"
+        x = rearrange(x, pattern, h=shp[0], w=shp[1])
         x = self.proj_out(x)
-        return x + x_in
+        return x + x_in 

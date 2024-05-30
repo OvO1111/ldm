@@ -63,9 +63,9 @@ class DataModuleFromConfig(pl.LightningDataModule):
             if sampler == TwoStreamBatchSampler:
                 has_batch_sampler = True
                 self.batch_sampler = sampler(primary_indices=self.datasets["train"].fine_labeled_indices, 
-                                            secondary_indices=self.datasets["train"].coarse_labeled_indices,
-                                            batch_size=self.batch_size,
-                                            secondary_batch_size=self.batch_size-1)
+                                             secondary_indices=self.datasets["train"].coarse_labeled_indices,
+                                             batch_size=self.batch_size,
+                                             secondary_batch_size=self.batch_size-1)
 
         # do not shuffle dataloader for iterable dataset
         shuffle = shuffle
@@ -75,18 +75,15 @@ class DataModuleFromConfig(pl.LightningDataModule):
         else: return test_dataloader()
 
     def _predict_dataloader(self, shuffle=False):
-        if self.use_worker_init_fn:
-            init_fn = worker_init_fn
-        else:
-            init_fn = None
-        return DataLoader(self.datasets["predict"], batch_size=self.batch_size,
-                          num_workers=self.num_workers, worker_init_fn=init_fn)
+        return self._test_dataloader(shuffle)
 
 
 class ImageLogger(Callback):
-    def __init__(self, test_batch_frequency=None, max_images=10, clamp=False,
-                 disabled=False, log_on_batch_idx=True, log_first_step=False,
-                 log_images_kwargs=None, save_num=30, log_nifti=False, logger=None,
+    def __init__(self, test_batch_frequency=1, max_images=-1, clamp=False,
+                 disabled=False, log_on_batch_idx=True, log_first_step=False, log_images_kwargs=None, logger=None,
+                 # nifti logging
+                 log_nifti=False, log_nifti_keys=["samples_mixed", "mask_mixed"], 
+                 # metrics logging
                  log_metrics=False, log_separate=False):
         super().__init__()
         self.batch_freq = test_batch_frequency
@@ -102,6 +99,7 @@ class ImageLogger(Callback):
         self.log_images_kwargs = log_images_kwargs if log_images_kwargs else {}
         self.log_first_step = log_first_step
         self.log_separate = log_separate
+        self.log_nifti_keys = log_nifti_keys
         
         def _get_logger(target, params):
             if target == "mask_rescale":
@@ -113,9 +111,9 @@ class ImageLogger(Callback):
         
         self.log_nifti = log_nifti
         if self.log_nifti: 
-            save_num = save_num * 2
+            self.max_images = self.max_images * 2
             self.nifti_logger = lambda x, p: sitk.WriteImage(sitk.GetImageFromArray(x), p)
-        self.keep_queue = Queue(save_num)
+        self.keep_queue = Queue(self.max_images)
         
         self.logger = {}
         self.log_metrics = log_metrics
@@ -139,29 +137,40 @@ class ImageLogger(Callback):
         if not os.path.exists(path):
             os.makedirs(path, exist_ok=True)
         return path
+    
+    def _enqueue_and_dequeue(self, entry, split="test"):
+        if self.keep_queue.full():
+            to_remove = self.keep_queue.get_nowait()
+            os.remove(to_remove)
+        self.keep_queue.put_nowait(entry)
 
     @rank_zero_only
     def log_local(self, save_dir, split, images, global_step, current_epoch, batch_idx, metrics=None):
         root = os.path.join(save_dir, "images", split)
         self._maybe_mkdir(root)
         filename = "gs-{:06}_e-{:06}_b-{:06}.png".format(
-                global_step,
-                current_epoch,
-                batch_idx)
+                    global_step,
+                    current_epoch,
+                    batch_idx)
         path = os.path.join(root, filename)
         if metrics is not None: images = images | {"metrics": str(metrics)}
         if self.log_separate:
             path = lambda x: os.path.join(self._maybe_mkdir(os.path.join(root, x)), filename)
             local_images = image_logger(images, path, n_grid_images=16, log_separate=True, **self.logger)
+            for k in local_images.keys(): self._enqueue_and_dequeue(path(k))
         else:
             local_images = image_logger(images, path, n_grid_images=16, log_separate=False, **self.logger)
+            self._enqueue_and_dequeue(path)
         
         if self.log_nifti:
-            for k in images:
-                if isinstance(k, torch.Tensor) and k in ["samples"]:
-                    _im = images[k].contiguous()
-                    nifti_logger = partial(self.nifti_logger, x=_im[0, 0])
-                    nifti_logger(p=path.replace(".png", f"_{k}.nii.gz"))
+            path = self._maybe_mkdir(os.path.join(root, "nifti"))
+            for k, _im in images.items():
+                if isinstance(k, torch.Tensor) and k in self.log_nifti_keys:
+                    for b in range(_im.shape[0]):
+                        filename = "key-{}_bs-{}.nii.gz".format(k, b)
+                        nifti_logger = partial(self.nifti_logger, x=_im[b])
+                        nifti_logger(p=os.path.join(path, filename))
+                        self._enqueue_and_dequeue(os.path.join(path, filename))
         return local_images
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):
@@ -196,15 +205,19 @@ class ImageLogger(Callback):
         batch_freq = self.batch_freq
         if ((check_idx % batch_freq) == 0 or (check_idx in log_steps)) and (
                 check_idx > 0 or self.log_first_step):
-            try:
-                log_steps.pop(0)
-            except IndexError as e:
-                print(e)
-                pass
+            # try:
+            #     log_steps.pop(0)
+            # except IndexError as e:
+            #     print(e)
+            #     pass
             return True
         return False
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        if not self.disabled:
+            self.log_img(pl_module, batch, batch_idx, split="test")
+            
+    def on_predict_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
         if not self.disabled:
             self.log_img(pl_module, batch, batch_idx, split="test")
 
@@ -303,7 +316,7 @@ if __name__ == "__main__":
             "tensorboard": {
                 "target": "pytorch_lightning.loggers.TensorBoardLogger",
                 "params": {
-                    "save_dir": os.path.dirname(logdir),
+                    "save_dir": logdir,
                     "name": nowname,
                     "version": "tensorboard",
                 }

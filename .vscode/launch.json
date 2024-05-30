@@ -25,7 +25,15 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./test.py",
-            "args": ["-b", "./configs/latent-diffusion/ruijin_3d_ldm_test.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
+            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm_test.yaml", "--gpus", "0,", "--name", "test", "--debug"],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "debug autoencoder-testtime",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./test.py",
+            "args": ["-b", "./configs/autoencoder/ruijin_3d_ae_kl_test.yaml", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {
@@ -34,6 +42,14 @@
             "request": "launch",
             "program": "${file}",
             "args": [],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "debug categoricaldiffusion",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./main.py",
+            "args": ["-b", "./configs/categorical-diffusion/ruijin_3d_cdm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
     ]

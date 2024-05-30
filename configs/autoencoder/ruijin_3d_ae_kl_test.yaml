@@ -1,11 +1,12 @@
 model:
   base_learning_rate: 4.5e-6
-  target: ldm.models.autoencoder.AutoencoderKL
+  target: inference.models.InferAutoencoderKL
   params:
     monitor: "val/rec_loss"
     image_key: image
     embed_dim: 4
     dims: 3
+    ckpt_path: /ailab/user/dailinrui/data/ldm/ruijin_vae_kl_96_192_192/checkpoints/epoch=000049.ckpt
     lossconfig:
       target: ldm.modules.losses.LPIPSWithDiscriminator
       params:
@@ -28,29 +29,32 @@ model:
       attn_resolutions: [8,]  # on z axis, starting with 8->16->32 for len(ch_mult)==4 and resolution==64
       attn_type: vanilla
       use_checkpoint: True  # always use ckpt
+    
+    eval_scheme: [1]
 
 data:
-  target: main.DataModuleFromConfig
+  target: test.DataModuleFromConfig
   params:
     batch_size: 1
     num_workers: 8
     wrap: False
-    train:
+    test:
       target: ldm.data.ruijin.Ruijin_3D
       params:
-        split: train
-    validation:
-      target: ldm.data.ruijin.Ruijin_3D
-      params:
-        split: val
+        split: test
 
 lightning:
   callbacks:
     image_logger:
-      target: main.ImageLogger
+      target: test.ImageLogger
       params:
-        train_batch_frequency: 4000
+        test_batch_frequency: 1
         max_images: 8
+        log_separate: true
+        log_images_kwargs:
+          verbose: false
+          log_metrics: true
+          log_group_metrics_in_2d: true
         logger:
           inputs: 
             target: image_rescale
@@ -58,7 +62,3 @@ lightning:
             target: image_rescale
           samples:
             target: image_rescale
-
-  trainer:
-    benchmark: True
-    accumulate_grad_batches: 2

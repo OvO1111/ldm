@@ -8,7 +8,9 @@ from enum import IntEnum
 from einops import rearrange, repeat
 from torch.nn.functional import interpolate
 from ldm.util import instantiate_from_config
+from ldm.models.diffusion.ccdm import CategoricalDiffusion
 from ldm.models.diffusion.ddpm import LatentDiffusion, Img2MaskDiffusion
+from ldm.models.autoencoder import AutoencoderKL, VQModel
 
 
 class MetricType(IntEnum):
@@ -18,10 +20,8 @@ class MetricType(IntEnum):
     fvd = 4
     
     
-class BaseInferDiffusion(LatentDiffusion):
-    def __init__(self, eval_scheme, **diffusion_kwargs):
-        super().__init__(**diffusion_kwargs)
-        
+class ComputeMetrics:
+    def __init__(self, eval_scheme):
         self.eval_scheme = eval_scheme
         if MetricType.lpips in self.eval_scheme:
             from ldm.modules.losses.lpips import LPIPS
@@ -37,18 +37,6 @@ class BaseInferDiffusion(LatentDiffusion):
             from torchmetrics.image.fid import FrechetInceptionDistance
             self.fvd_module = instantiate_from_config(diffusion_kwargs.get("fvd_config"))
             self.fvd = FrechetInceptionDistance(feature=self.fvd_module, normalize=True)
-            
-        self.eval()
-        
-    def on_test_start(self, *args):
-        if MetricType.fid in self.eval_scheme:
-            self.fid = self.fid.to(self.device)
-        if MetricType.fvd in self.eval_scheme:
-            self.fvd = self.fvd.to(self.device)
-        
-    @torch.no_grad()
-    def test_step(self, batch, batch_idx):
-        pass
     
     @torch.no_grad()
     def log_eval(self, x, y, log_group_metrics_in_2d=False):
@@ -135,8 +123,97 @@ class BaseInferDiffusion(LatentDiffusion):
         metrics = {k: v / i_buffer_fills for k, v in metrics.items()}
         return metrics
     
+
+class InferAutoencoderKL(AutoencoderKL, ComputeMetrics):
+    def __init__(self, eval_scheme, **autoencoder_kwargs):
+        AutoencoderKL.__init__(self, **autoencoder_kwargs)
+        ComputeMetrics.__init__(self, eval_scheme)
+        self.eval()
+        
+    def on_test_start(self, *args):
+        if MetricType.fid in self.eval_scheme:
+            self.fid = self.fid.to(self.device)
+        if MetricType.fvd in self.eval_scheme:
+            self.fvd = self.fvd.to(self.device)
+        
+    @torch.no_grad()
+    def test_step(self, batch, batch_idx):
+        pass
     
-class InferMixedDiffusion(BaseInferDiffusion):
+    @torch.no_grad()   
+    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, *args, **kwargs):
+        logs = super(InferAutoencoderKL, self).log_images(batch, *args, **kwargs)
+        x = logs["inputs"]
+        x_recon = logs["reconstructions"]
+        
+        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
+            metrics = self.log_eval(x_recon, x, log_group_metrics_in_2d)
+            # print(metrics)
+            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            return metrics, logs
+        
+    
+class InferLatentDiffusion(LatentDiffusion, ComputeMetrics):
+    def __init__(self, eval_scheme, **diffusion_kwargs):
+        LatentDiffusion.__init__(self, **diffusion_kwargs)
+        ComputeMetrics.__init__(self, eval_scheme)
+        self.eval()
+        
+    def on_test_start(self, *args):
+        if MetricType.fid in self.eval_scheme:
+            self.fid = self.fid.to(self.device)
+        if MetricType.fvd in self.eval_scheme:
+            self.fvd = self.fvd.to(self.device)
+        
+    @torch.no_grad()
+    def test_step(self, batch, batch_idx):
+        pass
+    
+    @torch.no_grad()
+    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, *args, **kwargs):
+        logs = super(InferLatentDiffusion, self).log_images(batch, *args, **kwargs)
+        
+        x = logs["inputs"]
+        x_samples = logs["samples"]
+        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
+            metrics = self.log_eval(x_samples, x, log_group_metrics_in_2d)
+            # print(metrics)
+            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            return metrics, logs
+        
+        return None, logs
+    
+
+class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics):
+    def __init__(self, eval_scheme, **diffusion_kwargs):
+        CategoricalDiffusion.__init__(self, **diffusion_kwargs)
+        ComputeMetrics.__init__(self, eval_scheme)
+        self.eval()
+    
+    def on_test_start(self, *args):
+        if MetricType.fid in self.eval_scheme:
+            self.fid = self.fid.to(self.device)
+        if MetricType.fvd in self.eval_scheme:
+            self.fvd = self.fvd.to(self.device)
+        
+    @torch.no_grad()
+    def test_step(self, batch, batch_idx):
+        pass
+    
+    @torch.no_grad()
+    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, *args, **kwargs):
+        logs = super(InferCategoricalDiffusion, self).log_images(batch, *args, **kwargs)
+        x = logs["inputs"]
+        x_recon = logs["samples"]
+        
+        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
+            metrics = self.log_eval(x_recon, x, log_group_metrics_in_2d)
+            # print(metrics)
+            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            return metrics, logs
+        
+
+class InferMixedDiffusion(InferLatentDiffusion):
     def __init__(self, **diffusion_kwargs):
         super().__init__(**diffusion_kwargs)
         
@@ -222,33 +299,14 @@ class InferMixedDiffusion(BaseInferDiffusion):
                 
             for i in range(b - 1): z_coarse[i, *z_coarse_masked_cropped[i][1:]] = z_local_mix[i]
             for i in range(b - 1): mask_coarse[i, *z_coarse_masked_cropped[i][1:]] = mask_local_mix[i]
-            z_mix = torch.cat([z_fine, z_coarse], dim=0)
-            mask_mix = self._interpolate(torch.cat([mask_fine, mask_coarse], dim=0), cf.shape[2:], mode="trilinear")
+            z_mix = z_coarse
+            mask_mix = self._interpolate(mask_coarse, cf.shape[2:], mode="trilinear")
             
             x_samples = self.decode_first_stage(z_mix, cf)
-            logs["samples_mixed"] = torch.cat([x_samples, mask_mix], dim=1)
+            logs["samples_mixed"] = x_samples
             logs["mask_mixed"] = mask_mix
             logs["mix_log"] = ','.join(mix_log)
             
-        x = logs["inputs"]
-        x_samples = logs["samples"]
-        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
-            metrics = self.log_eval(x_samples, x, log_group_metrics_in_2d)
-            # print(metrics)
-            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            return metrics, logs
-        
-        return None, logs
-
-
-class InferLatentDiffusion(BaseInferDiffusion):
-    def __init__(self, **diffusion_kwargs):
-        super().__init__(**diffusion_kwargs)
-    
-    @torch.no_grad()
-    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, *args, **kwargs):
-        logs = super(BaseInferDiffusion, self).log_images(batch, *args, **kwargs)
-        
         x = logs["inputs"]
         x_samples = logs["samples"]
         if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:

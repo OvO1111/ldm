@@ -182,12 +182,13 @@ def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
     return embedding
 
 
-def zero_module(module):
+def zero_module(module, enabled=True):
     """
     Zero out the parameters of a module and return it.
     """
-    for p in module.parameters():
-        p.detach().zero_()
+    if enabled:
+        for p in module.parameters():
+            p.detach().zero_()
     return module
 
 
@@ -256,6 +257,19 @@ def avg_pool_nd(dims, *args, **kwargs):
         return nn.AvgPool2d(*args, **kwargs)
     elif dims == 3:
         return nn.AvgPool3d(*args, **kwargs)
+    raise ValueError(f"unsupported dimensions: {dims}")
+
+
+def batch_norm_nd(dims, *args, **kwargs):
+    """
+    Create a 1D, 2D, or 3D average pooling module.
+    """
+    if dims == 1:
+        return nn.BatchNorm1d(*args, **kwargs)
+    elif dims == 2:
+        return nn.BatchNorm2d(*args, **kwargs)
+    elif dims == 3:
+        return nn.BatchNorm3d(*args, **kwargs)
     raise ValueError(f"unsupported dimensions: {dims}")
 
 
