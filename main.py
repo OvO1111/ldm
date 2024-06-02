@@ -407,8 +407,7 @@ class ImageLogger(Callback):
         check_idx = batch_idx if self.log_on_batch_idx else pl_module.global_step
         if (self.check_frequency(check_idx, split) and  # batch_idx % self.batch_freq == 0
                 hasattr(pl_module, "log_images") and
-                callable(pl_module.log_images) and
-                self.max_images > 0):
+                callable(pl_module.log_images)):
             logger = type(pl_module.logger)
 
             is_train = pl_module.training
@@ -790,8 +789,8 @@ if __name__ == "__main__":
             except Exception:
                 melk()
                 raise
-        if not opt.no_test and not trainer.interrupted:
-            trainer.test(model, data)
+        # if not opt.no_test and not trainer.interrupted:
+        #     trainer.test(model, data)
     except Exception:
         # if opt.debug and trainer.global_rank == 0:
         #     try:

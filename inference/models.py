@@ -252,9 +252,9 @@ class InferMixedDiffusion(InferLatentDiffusion):
                                             return_original_cond=True,)
         logs["inputs"] = x
         logs["reconstruction"] = xrec
-        b, *shp = x.shape
+        B, *shp = x.shape
         
-        assert b > 1
+        assert B > 1
         alpha = kwargs.get("mixup_ratio", .2)  # lower -> more fine gt ; higher -> more generated
         eta = kwargs.get("ddim_eta", 1)
         sample = kwargs.get("sample", True)
@@ -264,45 +264,50 @@ class InferMixedDiffusion(InferLatentDiffusion):
         cf = None if not self.first_stage_model.is_conditional else super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key)
         
         if sample:
-            samples, _ = self.sample_log(cond=c, batch_size=b, ddim=use_ddim, ddim_steps=ddim_steps, eta=eta)
+            samples, _ = self.sample_log(cond=c, batch_size=B, ddim=use_ddim, ddim_steps=ddim_steps, eta=eta)
             logs["samples"] = self.decode_first_stage(samples, cf)
+            primary_batch_size = self.trainer.datamodule.batch_sampler.primary_batch_size
             
-            z_fine = z[0:1]
-            z_coarse = samples[1:]
-            # convert mask shape to match latent shape
-            mask_fine = self._interpolate((cf[0:1] > 0).to(torch.float32), z_fine.shape[2:], mode="nearest")
-            mask_coarse = self._interpolate((cf[1:] > 0).to(torch.float32), z_coarse.shape[2:], mode="nearest")
-            # crop foreground region
-            z_fine_masked_cropped = self._get_foreground_bbox(mask_fine)
-            z_coarse_masked_cropped = self._get_foreground_bbox(mask_coarse, use_shape_on_background=True)
-            # resize fine foregrounds to coarse's size
-            z_fine_reshaped, mask_fine_reshaped, mix_log = [], [], []
-            for i in range(b - 1):
-                if z_fine_masked_cropped[0] is not None and z_coarse_masked_cropped[i] is not None:
-                    mix_log.append("ok")
-                    z_fine_reshaped.append(self._interpolate(z_fine[*z_fine_masked_cropped[0]], z_coarse[*z_coarse_masked_cropped[i]].shape[2:], mode="trilinear"))
-                    mask_fine_reshaped.append(self._interpolate(mask_fine[*z_fine_masked_cropped[0]], mask_coarse[*z_coarse_masked_cropped[i]].shape[2:], mode="nearest"))
-                else:
-                    if z_coarse_masked_cropped[i] is None:
-                        mix_log.append("nocrop-C")
-                        z_coarse_masked_cropped[i] = [slice(0, z_coarse[i].shape[j] + 1) for j in range(len(z_coarse[i].shape))]
-                    mix_log.append("nocrop-F")
-                    z_fine_reshaped.append(z_coarse[*z_coarse_masked_cropped[i]])
-                    mask_fine_reshaped.append(mask_coarse[*z_coarse_masked_cropped[i]])
-            # mixup
-            z_local_mix, mask_local_mix = [], []
-            for i in range(b - 1):
-                z_fine_reshaped[i][:, :, mask_fine_reshaped[i][0, 0] == 0] = z_coarse[*z_coarse_masked_cropped[i]][:, :, mask_fine_reshaped[i][0, 0] == 0]
-                mask_fine_reshaped[i][:, :, mask_fine_reshaped[i][0, 0] == 0] = mask_coarse[*z_coarse_masked_cropped[i]][:, :, mask_fine_reshaped[i][0, 0] == 0]
-                z_local_mix.append(z_fine_reshaped[i] * (1 - alpha) + z_coarse[*z_coarse_masked_cropped[i]] * alpha)
-                mask_local_mix.append(mask_fine_reshaped[i] * (1 - alpha))
-                
-            for i in range(b - 1): z_coarse[i, *z_coarse_masked_cropped[i][1:]] = z_local_mix[i]
-            for i in range(b - 1): mask_coarse[i, *z_coarse_masked_cropped[i][1:]] = mask_local_mix[i]
-            z_mix = z_coarse
-            mask_mix = self._interpolate(mask_coarse, cf.shape[2:], mode="trilinear")
+            z_fines = z[:primary_batch_size]
+            z_mix, mask_mix, mix_log = [], [], []
+            for b in range(primary_batch_size):
+                z_fine = z_fines[b: b + 1]
+                z_coarse = samples[primary_batch_size:]
+                # convert mask shape to match latent shape
+                mask_fine = self._interpolate((cf[b: b+1] > 0).to(torch.float32), z_fine.shape[2:], mode="nearest")
+                mask_coarse = self._interpolate((cf[primary_batch_size:] > 0).to(torch.float32), z_coarse.shape[2:], mode="nearest")
+                # crop foreground region
+                z_fine_masked_cropped = self._get_foreground_bbox(mask_fine)
+                z_coarse_masked_cropped = self._get_foreground_bbox(mask_coarse, use_shape_on_background=True)
+                # resize fine foregrounds to coarse's size
+                z_fine_reshaped, mask_fine_reshaped = [], []
+                for i in range(B - primary_batch_size):
+                    if z_fine_masked_cropped[0] is not None and z_coarse_masked_cropped[i] is not None:
+                        mix_log.append("ok")
+                        z_fine_reshaped.append(self._interpolate(z_fine[*z_fine_masked_cropped[0]], z_coarse[*z_coarse_masked_cropped[i]].shape[2:], mode="trilinear"))
+                        mask_fine_reshaped.append(self._interpolate(mask_fine[*z_fine_masked_cropped[0]], mask_coarse[*z_coarse_masked_cropped[i]].shape[2:], mode="nearest"))
+                    else:
+                        if z_coarse_masked_cropped[i] is None:
+                            mix_log.append("nocrop-C")
+                            z_coarse_masked_cropped[i] = [slice(0, z_coarse[i].shape[j] + 1) for j in range(len(z_coarse[i].shape))]
+                        mix_log.append("nocrop-F")
+                        z_fine_reshaped.append(z_coarse[*z_coarse_masked_cropped[i]])
+                        mask_fine_reshaped.append(mask_coarse[*z_coarse_masked_cropped[i]])
+                # mixup
+                z_local_mix, mask_local_mix = [], []
+                for i in range(B - primary_batch_size):
+                    z_fine_reshaped[i][:, :, mask_fine_reshaped[i][0, 0] == 0] = z_coarse[*z_coarse_masked_cropped[i]][:, :, mask_fine_reshaped[i][0, 0] == 0]
+                    mask_fine_reshaped[i][:, :, mask_fine_reshaped[i][0, 0] == 0] = mask_coarse[*z_coarse_masked_cropped[i]][:, :, mask_fine_reshaped[i][0, 0] == 0]
+                    z_local_mix.append(z_fine_reshaped[i] * (1 - alpha) + z_coarse[*z_coarse_masked_cropped[i]] * alpha)
+                    mask_local_mix.append(mask_fine_reshaped[i] * (1 - alpha))
+                    
+                for i in range(B - primary_batch_size): z_coarse[i, *z_coarse_masked_cropped[i][1:]] = z_local_mix[i]
+                for i in range(B - primary_batch_size): mask_coarse[i, *z_coarse_masked_cropped[i][1:]] = mask_local_mix[i]
+                z_mix.append(z_coarse)
+                mask_mix.append(self._interpolate(mask_coarse, cf.shape[2:], mode="trilinear"))
             
-            x_samples = self.decode_first_stage(z_mix, cf)
+            z_mix, mask_mix = map(lambda x: torch.cat(x, dim=0), [z_mix, mask_mix])
+            x_samples = self.decode_first_stage(z_mix, cf[primary_batch_size:])
             logs["samples_mixed"] = x_samples
             logs["mask_mixed"] = mask_mix
             logs["mix_log"] = ','.join(mix_log)

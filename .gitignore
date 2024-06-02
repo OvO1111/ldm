@@ -2,6 +2,7 @@
 dependency/*.pth
 
 # ignore slurm runs
+run/
 runs/
 wandb/
 

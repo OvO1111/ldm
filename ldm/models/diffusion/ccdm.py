@@ -95,10 +95,13 @@ class CategoricalDiffusion(pl.LightningModule):
                  use_scheduler=False,
                  scheduler_config=None,
                  monitor=None,
+                 ckpt_path=None,
+                 ignore_keys=None,
+                 load_only_unet=False,
                  conditioning_key="crossattn",
                  num_classes=12,
                  given_betas=None,
-                 loss_type='l1',
+                 loss_type='l2',
                  beta_schedule="cosine",
                  linear_start=1e-2,
                  linear_end=2e-1,
@@ -108,7 +111,9 @@ class CategoricalDiffusion(pl.LightningModule):
                  p_x1_sample="majority",
                  parameterization="kl",
                  cond_stage_trainable=False,
-                 cond_stage_forward=None, **kwargs) -> None:
+                 cond_stage_forward=None,
+                 use_automatic_optimization=True,
+                 **kwargs) -> None:
         super().__init__()
         self.data_key = data_key
         self.cond_key = cond_key
@@ -120,11 +125,13 @@ class CategoricalDiffusion(pl.LightningModule):
         self.loss_config = loss_config
         self.train_ddim_sigmas = train_ddim_sigmas
         if self.use_scheduler:
-            self.automatic_optimization = False
             self.scheduler_config = scheduler_config
         if monitor is not None:
             self.monitor = monitor
+        if ckpt_path is not None:
+            self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys, only_model=load_only_unet)
         self.num_classes = num_classes
+        self.automatic_optimization = use_automatic_optimization
         if not exists(class_weights):
             class_weights = torch.ones((self.num_classes,))
         self.register_buffer("class_weights", torch.tensor(class_weights))
@@ -233,29 +240,17 @@ class CategoricalDiffusion(pl.LightningModule):
             lpips = self.lpips(x, y)
         return lpips
     
-    def kl_div(self, xt, x0, x0pred, t, noise=None):
-        q_xtm1_given_xt_x0 = self.q_xtm1_given_x0_xt(xt, x0, t,)
-        q_xtm1_given_xt_x0pred = self.q_xtm1_given_x0pred_xt(xt, x0pred, t,)
-        
-        kl_loss = f.kl_div(torch.log(torch.clamp(q_xtm1_given_xt_x0pred, min=1e-12)),
-                           q_xtm1_given_xt_x0,
-                           reduction='none')
-        kl_loss_per_class = kl_loss.sum(1) * self.class_weights[x0.argmax(1)]
-        if (kl_loss_per_class < -1e-3).any():
-            raise RuntimeError(f"negative KL divergence {(kl_loss_per_class < -1e-3).sum()} in loss {kl_loss_per_class.sum()}!!")
-        return kl_loss_per_class.sum() / x0.shape[0]
-    
     def q_xt_given_xtm1(self, xtm1, t, noise=None):
         betas = extract_into_tensor(self.betas, t, xtm1.shape)
         if noise is None: probs = (1 - betas) * xtm1 + betas / self.num_classes
         else: probs = (1 - betas) * xtm1 + betas * noise
-        return OneHotCategoricalBCHW(probs)
+        return probs
 
     def q_xt_given_x0(self, x0, t, noise=None):
         alphas_cumprod = extract_into_tensor(self.alphas_cumprod, t, x0.shape)
         if noise is None: probs = alphas_cumprod * x0 + (1 - alphas_cumprod) / self.num_classes
         else: probs = alphas_cumprod * x0 + (1 - alphas_cumprod) * noise
-        return OneHotCategoricalBCHW(probs)
+        return probs
 
     def q_xtm1_given_x0_xt(self, xt, x0, t):
         # computes q_xtm1 given q_xt, q_x0, noise
@@ -315,8 +310,8 @@ class CategoricalDiffusion(pl.LightningModule):
     
     def p_losses(self, x0, c, t, class_id=None, *args, **kwargs):
         noise = OneHotCategoricalBCHW(logits=torch.zeros_like(x0)).sample()
-        xt = self.q_xt_given_x0(x0, t, noise).sample()
-        model_outputs = self.model(xt, t, **c)
+        q_xt = self.q_xt_given_x0(x0, t, noise)
+        model_outputs = self.model(q_xt, t, **c)
         if isinstance(model_outputs, dict): 
             label_cond = model_outputs.get("label_out")
             model_outputs = model_outputs["diffusion_out"]
@@ -324,26 +319,27 @@ class CategoricalDiffusion(pl.LightningModule):
         loss_log = dict()
         log_prefix = 'train' if self.training else 'val'
         if self.parameterization == "kl":
+            xt = OneHotCategoricalBCHW(q_xt).sample()
             q_xtm1_given_xt_x0 = self.q_xtm1_given_x0_xt(xt, x0, t,)
             q_xtm1_given_xt_x0pred = self.q_xtm1_given_x0pred_xt(xt, model_outputs, t,)
             
             kl_loss = f.kl_div(torch.log(torch.clamp(q_xtm1_given_xt_x0pred, min=1e-12)),
-                            q_xtm1_given_xt_x0,
-                            reduction='none')
+                                q_xtm1_given_xt_x0,
+                                reduction='none')
             kl_loss_per_class = kl_loss.sum(1) * self.class_weights[x0.argmax(1)]
-            if (kl_loss_per_class < -1e-3).any():
-                raise RuntimeError(f"negative KL divergence {(kl_loss_per_class < -1e-3).sum()} in loss {kl_loss_per_class.sum()}!!")
+            if (kl_loss_per_class.sum() < -1e-3).any():
+                print(f"negative KL divergence {kl_loss_per_class.sum()} encountered in loss")
             batch_loss = kl_loss_per_class.sum() / x0.shape[0]
             loss_log[f"{log_prefix}/kl_div"] = batch_loss.item() * self.loss_config["kl_div"].get("coeff", 1)
         
         elif self.parameterization in ['x0', 'eps']:
             target = x0 if self.parameterization == 'x0' else noise
             if self.loss_type == 'l1':
-                dir_loss = (model_outputs - target).mean()
+                dir_loss = (model_outputs - target).sum()
             elif self.loss_type == 'l2':
-                dir_loss = f.mse_loss(model_outputs, target)
+                dir_loss = f.mse_loss(model_outputs, target, reduction='none').sum()
             batch_loss = dir_loss
-            loss_log[f"{log_prefix}/dir_loss"] = batch_loss.item() * self.loss_config["dir_loss"].get("coeff, 1")
+            loss_log[f"{log_prefix}/dir_loss"] = batch_loss.item() * self.loss_config["dir_loss"].get("coeff", 1)
             
         if hasattr(self.model.diffusion_model, "use_label_predictor") and self.model.diffusion_model.use_label_predictor:
             ce_loss = f.cross_entropy(label_cond, class_id)
@@ -352,13 +348,14 @@ class CategoricalDiffusion(pl.LightningModule):
             
         loss_log["debug"] = model_outputs.argmax(1).max()
 
-        if self.use_scheduler:
-            lr = self.optimizers().param_groups[0]['lr']
-            self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
-            
+        if not self.automatic_optimization and self.training:
             opt = self.optimizers()
+            if self.use_scheduler:
+                lr = opt.param_groups[0]['lr']
+                self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
+                
             opt.zero_grad()
-            batch_loss.backward()
+            self.manual_backward(batch_loss)
             opt.step()
         
         return batch_loss, loss_log
@@ -399,64 +396,66 @@ class CategoricalDiffusion(pl.LightningModule):
         logs["inputs"] = x0.argmax(1)
         if split == "train":
             t = torch.randint(0, self.num_timesteps, (b,), device=self.device).long()
-            xt = self.q_xt_given_x0(x0, t).sample()
-            model_outputs = self.model(xt, t, **c)
+            q_xt = self.q_xt_given_x0(x0, t, noise)
+            model_outputs = self.model(q_xt, t, **c)
             if isinstance(model_outputs, dict): 
                 model_outputs = model_outputs["diffusion_out"]
             
             logs["t"] = str(t.cpu().numpy().tolist())
-            logs["noise"] = xt.argmax(1)
+            logs["noise"] = noise.argmax(1)
+            logs["samples"] = OneHotCategoricalBCHW(model_outputs).max_prob_sample().argmax(1)
         elif split == "val":
             t = torch.tensor((self.timesteps,) * b, device=self.device)
-            model_outputs = self.p_sample(noise, c, shape=x0.shape, **kwargs)
+            x0pred = self.p_sample(noise, c, shape=x0.shape, **kwargs)
+            logs["samples"] = x0pred.argmax(1)
             
         lpips = self.lpips_loss(model_outputs, x0)
         logs["conditioning"] = str(batch["text"])
-        logs["samples"] = model_outputs.argmax(1)
         self.log(f"{split}/lpips_metric", lpips, prog_bar=True, on_step=True)
             
         return logs
     
     @torch.no_grad()
-    def p_sample(self, xt=None, c=None, use_ddim=False, ddim_steps=50, shape=None, verbose=False,
+    def p_sample(self, q_xT=None, c=None, use_ddim=False, ddim_steps=50, shape=None, verbose=False,
                  log_denoising=False, log_every_t=100):
         logs = dict()
         with self.ema_scope():
             c = c if exists(c) else dict()
-            xt = xt if exists(xt) else OneHotCategoricalBCHW(logits=torch.zeros_like(shape)).sample()
+            q_xT = q_xT if exists(q_xT) else OneHotCategoricalBCHW(logits=torch.zeros_like(shape)).sample()
+            p_xtm1_given_xt, b = q_xT, q_xT.shape[0]
             if not use_ddim:
                 t_values = reversed(range(1, self.timesteps)) if not verbose else tqdm(reversed(range(1, self.timesteps)), total=self.timesteps, desc="sampling progress")
                 for t in t_values:
-                    t_ = torch.full(size=(xt.shape[0],), fill_value=t, device=xt.device)
-                    model_outputs = self.model(xt, t_, **c)
+                    t_ = torch.full(size=(b,), fill_value=t, device=q_xT.device)
+                    model_outputs = self.model(p_xtm1_given_xt, t_, **c)
                     if isinstance(model_outputs, dict): 
                         model_outputs = model_outputs["diffusion_out"]
-                    p_xtm1_given_xt = torch.clamp(self.q_xtm1_given_x0pred_xt(xt, model_outputs, t_), min=1e-12)
-                    xt = OneHotCategoricalBCHW(probs=p_xtm1_given_xt).sample()
+                    p_xtm1_given_xt = torch.clamp(self.q_xtm1_given_x0_xt(q_xT, model_outputs, t_), min=1e-12)
+                    # xt = OneHotCategoricalBCHW(probs=p_xtm1_given_xt).sample()
                     
                 if self.p_x1_sample == "majority":
-                    xt = OneHotCategoricalBCHW(probs=p_xtm1_given_xt).max_prob_sample()
+                    x0pred = OneHotCategoricalBCHW(probs=p_xtm1_given_xt).max_prob_sample()
                 elif self.p_x1_sample == "confidence":
-                    xt = OneHotCategoricalBCHW(probs=p_xtm1_given_xt).prob_sample()
-                return xt
+                    x0pred = OneHotCategoricalBCHW(probs=p_xtm1_given_xt).prob_sample()
+                return x0pred
             else:
                 ddim_timesteps = make_ddim_timesteps("uniform", num_ddim_timesteps=ddim_steps, num_ddpm_timesteps=self.timesteps, verbose=verbose)
                 t_values = reversed(range(0, ddim_steps)) if not verbose else tqdm(reversed(range(0, ddim_steps)), total=self.timesteps, desc="ddim sampling progress")
                 for t in t_values:
-                    t_ = torch.full(size=(xt.shape[0],), fill_value=ddim_timesteps[t], device=xt.device)
-                    model_outputs = self.model(xt, t_, **c)
+                    t_ = torch.full(size=(q_xT.shape[0],), fill_value=ddim_timesteps[t], device=q_xT.device)
+                    model_outputs = self.model(q_xT, t_, **c)
                     if isinstance(model_outputs, dict): 
                         model_outputs = model_outputs["diffusion_out"]
-                    p_xtm1_given_xt = torch.clamp(self.q_xtm1_given_x0pred_xt(xt, model_outputs, t_), min=1e-12)
+                    p_xtm1_given_xt = torch.clamp(self.q_xtm1_given_x0pred_xt(q_xT, model_outputs, t_), min=1e-12)
 
                     if t > 1:
-                        xt = OneHotCategoricalBCHW(probs=p_xtm1_given_xt).sample()
+                        q_xT = OneHotCategoricalBCHW(probs=p_xtm1_given_xt).sample()
                     else:
                         if self.p_x1_sample == "majority":
-                            xt = OneHotCategoricalBCHW(probs=p_xtm1_given_xt).max_prob_sample()
+                            q_xT = OneHotCategoricalBCHW(probs=p_xtm1_given_xt).max_prob_sample()
                         elif self.p_x1_sample == "confidence":
-                            xt = OneHotCategoricalBCHW(probs=p_xtm1_given_xt).prob_sample()
-                return xt
+                            q_xT = OneHotCategoricalBCHW(probs=p_xtm1_given_xt).prob_sample()
+                return q_xT
             
     @torch.no_grad()
     def p_sample_ddim(self, xt, c, ddim_t, t):

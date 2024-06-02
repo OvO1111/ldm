@@ -16,6 +16,7 @@ from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.utilities.distributed import rank_zero_only
+from torch.utils.data.sampler import BatchSampler
 
 from ldm.util import instantiate_from_config, get_obj_from_str
 from inference.utils import image_logger, TwoStreamBatchSampler, combine_mask_and_im
@@ -62,17 +63,20 @@ class DataModuleFromConfig(pl.LightningDataModule):
             sampler = get_obj_from_str(self.batch_sampler["target"])
             if sampler == TwoStreamBatchSampler:
                 has_batch_sampler = True
-                self.batch_sampler = sampler(primary_indices=self.datasets["train"].fine_labeled_indices, 
-                                             secondary_indices=self.datasets["train"].coarse_labeled_indices,
+                try:
+                    primary_batch_size = self.batch_sampler["params"].get("primary_batch_size", 1)
+                except Exception: primary_batch_size = 1
+                self.batch_sampler = sampler(primary_indices=self.datasets["test"].fine_labeled_indices, 
+                                             secondary_indices=self.datasets["test"].coarse_labeled_indices,
                                              batch_size=self.batch_size,
-                                             secondary_batch_size=self.batch_size-1)
+                                             secondary_batch_size=self.batch_size-primary_batch_size)
 
         # do not shuffle dataloader for iterable dataset
-        shuffle = shuffle
+        shuffle = shuffle and not has_batch_sampler
         test_dataloader = partial(DataLoader, self.datasets["test"],
-                                  num_workers=self.num_workers, worker_init_fn=init_fn, shuffle=shuffle and not has_batch_sampler)
+                                  num_workers=self.num_workers, worker_init_fn=init_fn, shuffle=shuffle, drop_last=False)
         if not has_batch_sampler: return test_dataloader(batch_size=self.batch_size)
-        else: return test_dataloader()
+        else: return test_dataloader(batch_sampler=self.batch_sampler, sampler=None)
 
     def _predict_dataloader(self, shuffle=False):
         return self._test_dataloader(shuffle)
@@ -163,11 +167,11 @@ class ImageLogger(Callback):
             self._enqueue_and_dequeue(path)
         
         if self.log_nifti:
-            path = self._maybe_mkdir(os.path.join(root, "nifti"))
             for k, _im in images.items():
-                if isinstance(k, torch.Tensor) and k in self.log_nifti_keys:
+                path = self._maybe_mkdir(os.path.join(root, "nifti", k))
+                if isinstance(_im, torch.Tensor) and k in self.log_nifti_keys:
                     for b in range(_im.shape[0]):
-                        filename = "key-{}_bs-{}.nii.gz".format(k, b)
+                        filename = "bs-{}_b-{}.nii.gz".format(b, batch_idx)
                         nifti_logger = partial(self.nifti_logger, x=_im[b])
                         nifti_logger(p=os.path.join(path, filename))
                         self._enqueue_and_dequeue(os.path.join(path, filename))
@@ -177,8 +181,7 @@ class ImageLogger(Callback):
         check_idx = batch_idx if self.log_on_batch_idx else pl_module.global_step
         if (self.check_frequency(check_idx, split) and  # batch_idx % self.batch_freq == 0
                 hasattr(pl_module, "log_images") and
-                callable(pl_module.log_images) and
-                self.max_images > 0):
+                callable(pl_module.log_images)):
             logger = type(pl_module.logger)
 
             is_train = False

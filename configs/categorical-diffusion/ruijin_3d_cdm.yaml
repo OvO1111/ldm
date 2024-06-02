@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 1e-4
+  base_learning_rate: 2e-5
   target: ldm.models.diffusion.ccdm.CategoricalDiffusion
   params:
     linear_start: 1e-2
@@ -9,9 +9,11 @@ model:
     num_classes: 12  # include background class
     data_key: mask
     cond_key: context
+    parameterization: x0
     conditioning_key: crossattn
     monitor: val/lpips_metric_epoch
     cond_stage_trainable: false
+    use_automatic_optimization: false
     class_weights: [1,1,1,1,1,1,1,1,1,1,1,1]
 
     unet_config:
@@ -41,8 +43,8 @@ model:
       #   coeff: 10
       kl_div:
         coeff: 1
-      # l1_loss:
-      #   coeff: 1000
+      dir_loss:
+        coeff: 1
 
 data:
   target: main.DataModuleFromConfig
@@ -55,6 +57,7 @@ data:
       params:
         split: train
         resize_to: [64, 128, 128]
+        max_size: 10
     validation:
       target: ldm.data.ruijin.Ruijin_3D
       params:

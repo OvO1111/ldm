@@ -79,12 +79,17 @@ data:
   target: test.DataModuleFromConfig
   params:
     batch_size: 2
-    num_workers: 2
+    num_workers: 12
     wrap: False
+    batch_sampler: 
+      target: 
+        inference.utils.TwoStreamBatchSampler
+      params:
+        primary_batch_size: 1
     test:
       target: ldm.data.brats2021.BraTS2021_3D
       params:
-        split: test
+        split: train
         crop_to: [128, 128, 128]
 
 lightning:
@@ -93,8 +98,9 @@ lightning:
       target: test.ImageLogger
       params:
         test_batch_frequency: 1
-        max_images: 4
+        max_images: -1
         log_separate: false
+        log_nifti: true
         clamp: false
         logger:
           inputs: 
@@ -113,5 +119,6 @@ lightning:
           #     n_mask: 3
 
   trainer:
-    benchmark: True
+    benchmark: true
+    replace_sampler_ddp: false
     max_epochs: 1

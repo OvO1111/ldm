@@ -15,6 +15,7 @@ from einops import rearrange
 from scipy.ndimage import sobel
 from collections import namedtuple
 from torch.utils.data.sampler import Sampler
+from torch.utils.data.distributed import DistributedSampler
 
 
 OrganClass = namedtuple("OrganClass", ["label_name", "totalseg_id", "color"])
@@ -193,6 +194,26 @@ def image_logger(dict_of_images, path, n_labels=11, n_grid_images=8, log_separat
     return image_from_plt
 
 
+class DistributedTwoStreamBatchSampler(DistributedSampler):
+    def __init__(self, dataset, primary_indices, secondary_indices, batch_size, secondary_batch_size,
+                 num_replicas=None, rank=None, shuffle=True,
+                 seed=0, drop_last: bool = False) -> None:
+        super().__init__(dataset=dataset, num_replicas=num_replicas, rank=rank, shuffle=shuffle, seed=seed,
+                         drop_last=drop_last)
+        self.batch_sampler = TwoStreamBatchSampler(primary_indices=primary_indices,
+                                                   secondary_indices=secondary_indices,
+                                                   batch_size=batch_size,
+                                                   secondary_batch_size=secondary_batch_size)
+        self.batch_size = batch_size
+
+    def __iter__(self):
+        indices = list(super().__iter__())
+        return iter(self.batch_sampler)
+
+    def __len__(self) -> int:
+        return len(self.batch_sampler)
+
+
 class TwoStreamBatchSampler(Sampler):
     def __init__(self, primary_indices, secondary_indices, batch_size, secondary_batch_size, **kwargs):
         self.batch_size = batch_size
@@ -208,6 +229,10 @@ class TwoStreamBatchSampler(Sampler):
             print("using coarse labels extracted from fine labels as supervision")
         # assert len(self.secondary_indices) >= self.secondary_batch_size >= 0,\
         #     f"condition {len(self.secondary_indices)} >= {self.secondary_batch_size} >= 0 is not satisfied"
+        
+    @property
+    def drop_last(self, *args, **kwargs):
+        return False
 
     def __iter__(self):
         primary_iter = iterate_once(self.primary_indices)
