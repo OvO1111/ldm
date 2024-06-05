@@ -119,8 +119,8 @@ def combine_mask_and_im(x, overlay_coef=0.2, colors=None, n=11, mask_normalied=T
     return colored_im
 
 
-def visualize(image: torch.Tensor, n: int=11, num_images=8):
-    is_mask = image.dtype == torch.long
+def visualize(image: torch.Tensor, n_mask: int=11, num_images=8, is_mask=False):
+    is_mask = is_mask or image.dtype == torch.long
     if len(image.shape) == 5:
         image = image[:, 0] 
     if len(image.shape) == 4:
@@ -131,17 +131,19 @@ def visualize(image: torch.Tensor, n: int=11, num_images=8):
 
     if is_mask:
         cmap = get_cmap("viridis")
-        rgb = torch.tensor([(0, 0, 0)] + [cmap(i)[:-1] for i in np.arange(0.3, n) / n], device=image.device)
+        rgb = torch.tensor([(0, 0, 0)] + [cmap(i)[:-1] for i in np.arange(0.3, n_mask) / n_mask], device=image.device)
         colored_mask = rearrange(rgb[image][0], "i j n -> 1 n i j")
         return colored_mask
     else:
         return image
 
 
-def image_logger(dict_of_images, path, n_labels=11, n_grid_images=8, log_separate=False, **kwargs):
+def image_logger(dict_of_images, path, log_separate=False, **kwargs):
     ind_vis = {}
     for k, v in dict_of_images.items():
-        if isinstance(v, torch.Tensor): ind_vis[str(k)] = visualize(kwargs.get(k, lambda x: x)(v), n_labels, n_grid_images).squeeze().data.cpu().numpy()
+        process_fn = kwargs.get(k, lambda x: (x, {}))(v)
+        v, visualize_kwargs = process_fn
+        if isinstance(v, torch.Tensor): ind_vis[str(k)] = visualize(v, **visualize_kwargs).squeeze().data.cpu().numpy()
         elif isinstance(v, str): ind_vis[str(k)] = v
     h = max([getattr(x, "shape", [0, 0, 0])[1] for x in ind_vis.values()])
     w = sum([getattr(x, "shape", [0, 0, 0])[2] for x in ind_vis.values()])
@@ -215,12 +217,13 @@ class DistributedTwoStreamBatchSampler(DistributedSampler):
 
 
 class TwoStreamBatchSampler(Sampler):
-    def __init__(self, primary_indices, secondary_indices, batch_size, secondary_batch_size, **kwargs):
+    def __init__(self, primary_indices, secondary_indices, batch_size, secondary_batch_size, iterator_on_primary_indices=False, **kwargs):
         self.batch_size = batch_size
         self.primary_indices = primary_indices
         self.secondary_indices = secondary_indices
         self.secondary_batch_size = secondary_batch_size
         self.primary_batch_size = batch_size - secondary_batch_size
+        self.iterator_on_primary_indices = iterator_on_primary_indices
 
         assert len(self.primary_indices) >= self.primary_batch_size > 0,\
             f"condition {len(self.primary_indices)} >= {self.primary_batch_size} > 0 is not satisfied"
@@ -229,13 +232,9 @@ class TwoStreamBatchSampler(Sampler):
             print("using coarse labels extracted from fine labels as supervision")
         # assert len(self.secondary_indices) >= self.secondary_batch_size >= 0,\
         #     f"condition {len(self.secondary_indices)} >= {self.secondary_batch_size} >= 0 is not satisfied"
-        
-    @property
-    def drop_last(self, *args, **kwargs):
-        return False
 
     def __iter__(self):
-        primary_iter = iterate_once(self.primary_indices)
+        primary_iter = iterate_eternally(self.primary_indices, len(self.secondary_indices) // len(self.primary_indices) if not self.iterator_on_primary_indices else 1)
         if self.secondary_batch_size != 0:
             secondary_iter = iterate_eternally(self.secondary_indices)
             return (
@@ -248,16 +247,19 @@ class TwoStreamBatchSampler(Sampler):
             return (primary_batch for primary_batch in grouper(primary_iter, self.primary_batch_size))
         
     def __len__(self):
-        return len(self.primary_indices) // self.primary_batch_size
+        if self.iterator_on_primary_indices: return len(self.primary_indices) // self.primary_batch_size
+        return len(self.secondary_indices) // self.secondary_batch_size
 
 
 def iterate_once(iterable):
     return np.random.permutation(iterable)
 
 
-def iterate_eternally(indices):
+def iterate_eternally(indices, iterations=-1):
     def infinite_shuffles():
-        while True:
+        itr = 0
+        while itr < iterations or iterations < 0:
+            itr += 1
             yield np.random.permutation(indices)
     return itertools.chain.from_iterable(infinite_shuffles())
 

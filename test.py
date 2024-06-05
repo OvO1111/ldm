@@ -3,20 +3,19 @@ import numpy as np
 import time
 import torch
 import wandb
-import SimpleITK as sitk
+import h5py
 import pytorch_lightning as pl
 
-from packaging import version
 from omegaconf import OmegaConf
 from functools import partial
 from queue import Queue
+from torch.utils.data import _utils
 
 from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.utilities.distributed import rank_zero_only
-from torch.utils.data.sampler import BatchSampler
 
 from ldm.util import instantiate_from_config, get_obj_from_str
 from inference.utils import image_logger, TwoStreamBatchSampler, combine_mask_and_im
@@ -74,7 +73,8 @@ class DataModuleFromConfig(pl.LightningDataModule):
         # do not shuffle dataloader for iterable dataset
         shuffle = shuffle and not has_batch_sampler
         test_dataloader = partial(DataLoader, self.datasets["test"],
-                                  num_workers=self.num_workers, worker_init_fn=init_fn, shuffle=shuffle, drop_last=False)
+                                  num_workers=self.num_workers, worker_init_fn=init_fn, shuffle=shuffle, drop_last=False, 
+                                  collate_fn=getattr(self.datasets["test"], "collate", _utils.collate.default_collate))
         if not has_batch_sampler: return test_dataloader(batch_size=self.batch_size)
         else: return test_dataloader(batch_sampler=self.batch_sampler, sampler=None)
 
@@ -84,9 +84,9 @@ class DataModuleFromConfig(pl.LightningDataModule):
 
 class ImageLogger(Callback):
     def __init__(self, test_batch_frequency=1, max_images=-1, clamp=False,
-                 disabled=False, log_on_batch_idx=True, log_first_step=False, log_images_kwargs=None, logger=None,
+                 disabled=False, log_on_batch_idx=True, log_first_step=False, log_images_kwargs=None, logger={},
                  # nifti logging
-                 log_nifti=False, log_nifti_keys=["samples_mixed", "mask_mixed"], 
+                 log_original=False, log_original_keys=["samples_mixed", "mask_mixed"], 
                  # metrics logging
                  log_metrics=False, log_separate=False):
         super().__init__()
@@ -103,20 +103,19 @@ class ImageLogger(Callback):
         self.log_images_kwargs = log_images_kwargs if log_images_kwargs else {}
         self.log_first_step = log_first_step
         self.log_separate = log_separate
-        self.log_nifti_keys = log_nifti_keys
+        self.log_original_keys = log_original_keys
         
         def _get_logger(target, params):
             if target == "mask_rescale":
-                return lambda x: x * 1 / (params.get("n_mask") - 1)
+                return lambda x: (x.long(), dict(params) | {"is_mask": True})
             if target == "image_rescale":
-                return lambda x: (x - x.min()) / (x.max() - x.min())
+                return lambda x: ((x - x.min()) / (x.max() - x.min()), {})
             if target == "image_and_mask":
-                return lambda x: combine_mask_and_im(x, n=params.get("n_mask"), overlay_coef=params.get("overlay_coef", .2))
+                return lambda x: (combine_mask_and_im(x, n=params.get("n_mask"), overlay_coef=params.get("overlay_coef", .2)), {})
         
-        self.log_nifti = log_nifti
-        if self.log_nifti: 
+        self.log_original = log_original
+        if self.log_original: 
             self.max_images = self.max_images * 2
-            self.nifti_logger = lambda x, p: sitk.WriteImage(sitk.GetImageFromArray(x), p)
         self.keep_queue = Queue(self.max_images)
         
         self.logger = {}
@@ -166,15 +165,18 @@ class ImageLogger(Callback):
             local_images = image_logger(images, path, n_grid_images=16, log_separate=False, **self.logger)
             self._enqueue_and_dequeue(path)
         
-        if self.log_nifti:
-            for k, _im in images.items():
-                path = self._maybe_mkdir(os.path.join(root, "nifti", k))
-                if isinstance(_im, torch.Tensor) and k in self.log_nifti_keys:
-                    for b in range(_im.shape[0]):
-                        filename = "bs-{}_b-{}.nii.gz".format(b, batch_idx)
-                        nifti_logger = partial(self.nifti_logger, x=_im[b])
-                        nifti_logger(p=os.path.join(path, filename))
-                        self._enqueue_and_dequeue(os.path.join(path, filename))
+        if self.log_original:
+            self._maybe_mkdir(os.path.join(root, "h5"))
+            if len(self.log_original_keys) > 0:
+                bs = images[self.log_original_keys[0]].shape[0]
+                for mix_batch_idx in range(bs):
+                    filename = os.path.join(root, "h5", "b-{}_bs-{}.h5".format(batch_idx, mix_batch_idx))
+                    file = h5py.File(filename, "w")
+                    for k, _im in images.items():
+                        if isinstance(_im, torch.Tensor) and k in self.log_original_keys:
+                            file.create_dataset(k, data=_im[mix_batch_idx], compression='gzip')
+                    file.close()
+                    self._enqueue_and_dequeue(filename)
         return local_images
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):

@@ -1,27 +1,19 @@
 model:
-  base_learning_rate: 2e-5
-  target: ldm.models.diffusion.ccdm.CategoricalDiffusion
+  base_learning_rate: 2.0e-05
+  target: ldm.models.diffusion.ddpm.LatentDiffusion
   params:
-    linear_start: 1e-2
-    linear_end: 0.2
+    linear_start: 0.0015
+    linear_end: 0.0195
+    num_timesteps_cond: 1
     log_every_t: 200
     timesteps: 1000
-    num_classes: 12  # include background class
-    data_key: mask
-    cond_key: context
-    parameterization: x0
+    first_stage_key: mask
+    cond_stage_key: context
     conditioning_key: crossattn
-    monitor: val/dir_loss
+    image_size: [64, 128, 128]  # after first-stage encoding
+    channels: 12  # after first-stage encoding
+    monitor: val/loss_simple_ema
     cond_stage_trainable: false
-    use_scheduler: true 
-    scheduler_config:
-      target: torch.optim.lr_scheduler.LinearLR
-      params:
-        start_factor: 1
-        end_factor: 1e-3
-        total_iters: 500
-    use_automatic_optimization: false
-    class_weights: [1,1,1,1,1,1,1,1,1,1,1,1]
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.CCDMUNetModel
@@ -41,17 +33,14 @@ model:
         use_label_predictor: false
         n_labels: 6
 
+    first_stage_config: 
+      target: ldm.modules.encoders.modules.CategoricalDiffusionWrapper
+      params:
+        num_classes: 12
+        sample_scheme: majority
+
     cond_stage_config: 
       target: torch.nn.Identity
-      params:
-
-    loss_config:
-      # ce_loss:
-      #   coeff: 10
-      kl_div:
-        coeff: 1
-      dir_loss:
-        coeff: 1
 
 data:
   target: main.DataModuleFromConfig
@@ -64,7 +53,6 @@ data:
       params:
         split: train
         resize_to: [64, 128, 128]
-        max_size: 5
     validation:
       target: ldm.data.ruijin.Ruijin_3D
       params:
@@ -85,10 +73,6 @@ lightning:
             target: mask_rescale
             params: 
               n_mask: 11
-          noise:
-            target: mask_rescale
-            params: 
-              n_mask: 11
           samples:
             target: image_rescale
             params: 
@@ -96,5 +80,4 @@ lightning:
 
   trainer:
     benchmark: True
-    accumulate_grad_batches: 1
     max_epochs: 1000

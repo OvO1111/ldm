@@ -302,22 +302,23 @@ class SetupCallback(Callback):
 
         else:
             # ModelCheckpoint callback created log directory --- remove it
-            if not self.resume and os.path.exists(self.logdir):
-                dst, name = os.path.split(self.logdir)
-                dst = os.path.join(dst, "child_runs", name)
-                os.makedirs(os.path.split(dst)[0], exist_ok=True)
-                try:
-                    shutil.copytree(self.logdir, dst)
-                except FileNotFoundError:
-                    pass
-                except FileExistsError:
-                    pass
+            # if not self.resume and os.path.exists(self.logdir):
+            #     dst, name = os.path.split(self.logdir)
+            #     dst = os.path.join(dst, "child_runs", name)
+            #     os.makedirs(os.path.split(dst)[0], exist_ok=True)
+            #     try:
+            #         shutil.copytree(self.logdir, dst)
+            #     except FileNotFoundError:
+            #         pass
+            #     except FileExistsError:
+            #         pass
+            pass
 
 
 class ImageLogger(Callback):
     def __init__(self, train_batch_frequency, max_images, val_batch_frequency=None, clamp=False,
                  disabled=False, log_on_batch_idx=True, log_first_step=True,
-                 log_images_kwargs=None, log_nifti=False, logger=None, log_separate=False):
+                 log_images_kwargs=None, log_nifti=False, logger={}, log_separate=False, log_local_only=True):
         super().__init__()
         self.batch_freq_tr = train_batch_frequency
         self.batch_freq_val = default(val_batch_frequency, train_batch_frequency)
@@ -325,7 +326,7 @@ class ImageLogger(Callback):
         self.logger_log_images = {
             WandbLogger: self._wandb,
             TensorBoardLogger: self._board
-        }
+        } if not log_local_only else {}
         self.log_steps_tr = [2 ** n for n in range(int(np.log2(self.batch_freq_tr)) + 1)]
         self.log_steps_val = [2 ** n for n in range(int(np.log2(self.batch_freq_val)) + 1)]
         self.clamp = clamp
@@ -337,9 +338,9 @@ class ImageLogger(Callback):
         
         def _get_logger(target, params):
             if target == "mask_rescale":
-                return lambda x: x * 1 / (params.get("n_mask") - 1)
+                return lambda x: (x.long(), dict(params) | {"is_mask": True})
             if target == "image_rescale":
-                return lambda x: (x - x.min()) / (x.max() - x.min())
+                return lambda x: ((x - x.min()) / (x.max() - x.min()), {})
         
         self.log_nifti = log_nifti
         if self.log_nifti: 

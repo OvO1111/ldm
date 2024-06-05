@@ -1,0 +1,76 @@
+model:
+  base_learning_rate: 2.0e-05
+  target: ldm.models.diffusion.ddpm.LatentDiffusion
+  params:
+    linear_start: 0.0015
+    linear_end: 0.0195
+    num_timesteps_cond: 1
+    log_every_t: 200
+    timesteps: 1000
+    first_stage_key: image
+    cond_stage_key: coarse
+    conditioning_key: concat
+    image_size: [128, 128, 128]  # after first-stage encoding
+    channels: 4  # after first-stage encoding
+    monitor: val/loss_simple_ema
+    cond_stage_trainable: false
+
+    unet_config:
+      target: ldm.modules.diffusionmodules.openaimodel.UNetModel
+      params:
+        image_size: 128  # not used
+        in_channels: 5
+        out_channels: 4
+        model_channels: 32
+        attention_resolutions: [8, 16, 32]
+        num_res_blocks: 2
+        channel_mult: [1, 2, 4, 4, 8]
+        num_head_channels: 32
+        use_checkpoint: true  # always use ckpt
+
+    first_stage_config: 
+      target: ldm.modules.encoders.modules.DummyFirstStage
+
+    cond_stage_config: __is_first_stage__
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 1
+    num_workers: 2
+    wrap: False
+    train:
+      target: ldm.data.brats2021.BraTS2021_3D
+      params:
+        split: train
+        crop_to: [128, 128, 128]
+    validation:
+      target: ldm.data.brats2021.BraTS2021_3D
+      params:
+        split: val
+        crop_to: [128, 128, 128]
+
+lightning:
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        train_batch_frequency: 400
+        max_images: 20
+        log_separate: false
+        clamp: false
+        logger:
+          inputs: 
+            target: image_rescale
+          conditioning:
+            target: mask_rescale
+            params: 
+              n_mask: 1
+          reconstruction:
+            target: image_rescale
+          samples:
+            target: image_rescale
+
+  trainer:
+    benchmark: True
+    max_epochs: 1000

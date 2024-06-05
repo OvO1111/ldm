@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 from functools import partial
-import clip
 from einops import rearrange, repeat
-import kornia
+# import clip
+# import kornia
 
 
 from ldm.modules.x_transformer import Encoder, TransformerWrapper  # TODO: can we directly rely on lucidrains code and simply add this as a reuirement? --> test
@@ -200,3 +200,86 @@ class FrozenClipImageEmbedder(nn.Module):
         # x is assumed to be in range [-1,1]
         return self.model.encode_image(self.preprocess(x))
 
+
+class OneHotCategoricalBCHW(torch.distributions.OneHotCategorical):
+    """Like OneHotCategorical, but the probabilities are along dim=1."""
+
+    def __init__(
+            self,
+            probs=None,
+            logits=None,
+            validate_args=None):
+
+        if probs is not None and probs.ndim < 2:
+            raise ValueError("`probs.ndim` should be at least 2")
+
+        if logits is not None and logits.ndim < 2:
+            raise ValueError("`logits.ndim` should be at least 2")
+
+        probs = self.channels_last(probs) if probs is not None else None
+        logits = self.channels_last(logits) if logits is not None else None
+
+        super().__init__(probs, logits, validate_args)
+
+    def sample(self, sample_shape=torch.Size()):
+        res = super().sample(sample_shape)
+        return self.channels_second(res)
+
+    @staticmethod
+    def channels_last(arr: torch.Tensor) -> torch.Tensor:
+        """Move the channel dimension from dim=1 to dim=-1"""
+        dim_order = (0,) + tuple(range(2, arr.ndim)) + (1,)
+        return arr.permute(dim_order)
+
+    @staticmethod
+    def channels_second(arr: torch.Tensor) -> torch.Tensor:
+        """Move the channel dimension from dim=-1 to dim=1"""
+        dim_order = (0, arr.ndim - 1) + tuple(range(1, arr.ndim - 1))
+        return arr.permute(dim_order)
+
+    def max_prob_sample(self):
+        """Sample with maximum probability"""
+        num_classes = self.probs.shape[-1]
+        res = torch.nn.functional.one_hot(self.probs.argmax(dim=-1), num_classes)
+        return self.channels_second(res)
+
+    def prob_sample(self):
+        """Sample with probabilities"""
+        return self.channels_second(self.probs)
+
+    
+class CategoricalDiffusionWrapper(nn.Module):
+    def __init__(self, num_classes, sample_scheme="majority"):
+        super().__init__()
+        self.dummy = nn.Identity()
+        self.is_conditional = False
+        self.num_classes = num_classes
+        self.sample_scheme = sample_scheme
+        
+    def encode(self, x, c=None):
+        x_onehot = nn.functional.one_hot((x * (self.num_classes - 1)).long(), self.num_classes)
+        x_onehot = rearrange(x_onehot, "b 1 h w d x -> b x h w d")
+        return x_onehot
+    
+    def decode(self, p, c=None, sample_scheme=None):
+        sample_scheme = sample_scheme if sample_scheme is not None else self.sample_scheme
+        distrib = OneHotCategoricalBCHW(logits=p)
+        if sample_scheme == "majority":
+            x = distrib.max_prob_sample()
+        elif sample_scheme == "confidence":
+            x = distrib.prob_sample()
+        else:
+            x = distrib.sample()
+        return x.argmax(1, keepdim=True)
+    
+    
+class DummyFirstStage(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.dummy = nn.Identity()
+        
+    def encode(self, x, c=None):
+        return self.dummy(x)
+    
+    def decode(self, p, c=None):
+        return self.dummy(p)

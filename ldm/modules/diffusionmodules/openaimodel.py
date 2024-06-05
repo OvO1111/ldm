@@ -942,7 +942,7 @@ class CCDMUNetModel(nn.Module):
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
         self.cond_encoded_shape = cond_encoded_shape
-        self.sofmtax_output = softmax_output
+        self.softmax_output = softmax_output
         self.use_ce_head = ce_head
         self.feature_cond_encoder = feature_cond_encoder
         # if feature_cond_encoder is not None:
@@ -1174,7 +1174,7 @@ class CCDMUNetModel(nn.Module):
                 self.output_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
 
-        if self.sofmtax_output:
+        if self.softmax_output:
             self.out = nn.Sequential(
                 normalization(ch),
                 nn.SiLU(),
@@ -1292,4 +1292,4 @@ class CCDMUNetModel(nn.Module):
         if self.out_ce is not None:
             ce_out = self.out_ce(h)
             ret["logits"] = ce_out
-        return ret
+        return ret["diffusion_out"]

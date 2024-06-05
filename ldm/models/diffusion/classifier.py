@@ -10,12 +10,13 @@ from einops import rearrange
 from glob import glob
 from natsort import natsorted
 
+from ldm.modules.encoders.modules import TransformerEmbedder
 from ldm.modules.diffusionmodules.openaimodel import EncoderUNetModel, UNetModel
 from ldm.util import log_txt_as_img, default, ismap, instantiate_from_config
 
 __models__ = {
-    'class_label': EncoderUNetModel,
-    'segmentation': UNetModel
+    'image_enc': EncoderUNetModel,
+    'text_enc': TransformerEmbedder
 }
 
 

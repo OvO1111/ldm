@@ -38,7 +38,7 @@ model:
         embed_dim: 4
         is_conditional: true
         dims: 3
-        ckpt_path: /ailab/user/dailinrui/data/ldm/static_brats21_cvae_kl_64_64_64/checkpoints/epoch=000871.ckpt
+        ckpt_path: /ailab/user/dailinrui/data/ldm/brats21_cvae_kl_64_64_64/checkpoints/last.ckpt
         lossconfig:
           target: torch.nn.Identity
 
@@ -78,7 +78,7 @@ model:
 data:
   target: test.DataModuleFromConfig
   params:
-    batch_size: 2
+    batch_size: 3
     num_workers: 12
     wrap: False
     batch_sampler: 
@@ -89,6 +89,7 @@ data:
     test:
       target: ldm.data.brats2021.BraTS2021_3D
       params:
+        n_fine: 10
         split: train
         crop_to: [128, 128, 128]
 
@@ -100,7 +101,8 @@ lightning:
         test_batch_frequency: 1
         max_images: -1
         log_separate: false
-        log_nifti: true
+        log_original: true
+        log_original_keys: [mixed_samples, mixed_fine, mixed_coarse]
         clamp: false
         logger:
           inputs: 
@@ -121,4 +123,4 @@ lightning:
   trainer:
     benchmark: true
     replace_sampler_ddp: false
-    max_epochs: 1
+    max_epochs: 

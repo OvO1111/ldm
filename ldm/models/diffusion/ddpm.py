@@ -330,8 +330,8 @@ class DDPM(pl.LightningModule):
 
     def get_input(self, batch, k):
         x = batch[k]
-        if len(x.shape) == 3:
-            x = x[:, None]
+        # if len(x.shape) == 3:
+        #     x = x[:, None]
         # x = rearrange(x, 'b h w c -> b c h w')
         x = x.to(memory_format=torch.contiguous_format).float()
         return x
@@ -469,6 +469,10 @@ class LatentDiffusion(DDPM):
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys)
             self.restarted_from_ckpt = True
+            
+        self.is_conditional_first_stage = False
+        if hasattr(self.first_stage_model, "is_conditional"):
+            if self.first_stage_model.is_conditional: self.is_conditional_first_stage = True
 
     def make_cond_schedule(self, ):
         self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
@@ -484,7 +488,7 @@ class LatentDiffusion(DDPM):
             # set rescale weight to 1./std of encodings
             print("### USING STD-RESCALING ###")
             x = super().get_input(batch, self.first_stage_key)
-            cf = None if not self.first_stage_model.is_conditional else super().get_input(batch, self.first_stage_model.cond_key).to(self.device)
+            cf = super().get_input(batch, self.first_stage_model.cond_key).to(self.device) if self.is_conditional_first_stage else None
             x = x.to(self.device)
             encoder_posterior = self.encode_first_stage(x, cf)
             z = self.get_first_stage_encoding(encoder_posterior).detach()
@@ -660,7 +664,7 @@ class LatentDiffusion(DDPM):
         if bs is not None:
             x = x[:bs]
         x = x.to(self.device)
-        cf = None if not self.first_stage_model.is_conditional else super().get_input(batch, self.first_stage_model.cond_key)
+        cf = super().get_input(batch, self.first_stage_model.cond_key).to(self.device) if self.is_conditional_first_stage else None
         encoder_posterior = self.encode_first_stage(x, cf)
         z = self.get_first_stage_encoding(encoder_posterior).detach()
 
@@ -1253,7 +1257,7 @@ class LatentDiffusion(DDPM):
 
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=4, sample=True, ddim_steps=200, ddim_eta=1., return_keys=None,
-                   quantize_denoised=True, inpaint=False, plot_denoise_rows=False, plot_progressive_rows=False,
+                   quantize_denoised=False, inpaint=False, plot_denoise_rows=False, plot_progressive_rows=False,
                    plot_diffusion_rows=False, verbose=False, **kwargs):
 
         use_ddim = ddim_steps is not None
@@ -1264,7 +1268,7 @@ class LatentDiffusion(DDPM):
                                            force_c_encode=True,
                                            return_original_cond=True,
                                            bs=N)
-        cf = None if not self.first_stage_model.is_conditional else super().get_input(batch, self.first_stage_model.cond_key)
+        cf = super().get_input(batch, self.first_stage_model.cond_key).to(self.device) if self.is_conditional_first_stage else None
         N = min(x.shape[0], N)
         n_row = min(x.shape[0], n_row)
         log["inputs"] = x
@@ -1445,7 +1449,7 @@ class Img2MaskDiffusion(LatentDiffusion):
         x, c = self.get_input(batch, self.first_stage_key)
         mx = super(LatentDiffusion, self).get_input(batch, self.mask_key)
         mx = repeat(mx, "b c ... -> b (repeat c) ...", repeat=self.first_stage_model.encoder.in_channels)
-        cf = None if not self.first_stage_model.is_conditional else super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key)
+        cf = super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key).to(self.device) if self.is_conditional_first_stage else None
         encoder_posterior = self.encode_first_stage(mx, cf)
         mz = self.get_first_stage_encoding(encoder_posterior).detach()
         if not self.training_vae_decoder: 
@@ -1552,7 +1556,7 @@ class Img2MaskDiffusion(LatentDiffusion):
         
         mx = super(LatentDiffusion, self).get_input(batch, self.mask_key)
         mx = repeat(mx, "b c ... -> b (repeat c) ...", repeat=self.first_stage_model.encoder.in_channels)
-        cf = None if not self.first_stage_model.is_conditional else super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key)
+        cf = super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key).to(self.device) if self.is_conditional_first_stage else None
         encoder_posterior = self.encode_first_stage(mx, cf)
         mz = self.get_first_stage_encoding(encoder_posterior).detach()
         mxrec = self.decode_mask(mz, cf).argmax(1, keepdim=True)
@@ -1602,50 +1606,65 @@ class CoarseAndFineDiffusion(LatentDiffusion):
                                         return_original_cond=True,)
         logs["inputs"] = x
         logs["reconstruction"] = xrec
-        b, *shp = x.shape
+        B, *shp = x.shape
         
-        assert b > 1
+        assert B > 1
         alpha = kwargs.get("mixup_ratio", .5)
         eta = kwargs.get("ddim_eta", 1)
         sample = kwargs.get("sample", True)
         ddim_steps = kwargs.get("ddim_steps", 200)
         use_ddim = kwargs.get("ddim_steps", 200) is not None
         # strictly only the first item is finely labeled, while the rest are not
-        cf = None if not self.first_stage_model.is_conditional else super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key)
+        cf = super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key).to(self.device) if self.is_conditional_first_stage else None
         
         if sample:
-            samples, _ = self.sample_log(cond=c, batch_size=b, ddim=use_ddim, ddim_steps=ddim_steps, eta=eta)
+            samples, _ = self.sample_log(cond=c, batch_size=B, ddim=use_ddim, ddim_steps=ddim_steps, eta=eta)
             logs["samples"] = self.decode_first_stage(samples, cf)
+            primary_batch_size = self.trainer.datamodule.batch_sampler.primary_batch_size
             
-            z_fine = samples[0:1]
-            z_coarse = samples[1:]
-            # convert mask shape to match latent shape
-            mask_fine = self._interpolate((cf[0:1] > 0).to(torch.float32), z_fine.shape[2:], mode="nearest")
-            mask_coarse = self._interpolate((cf[1:] > 0).to(torch.float32), z_coarse.shape[2:], mode="nearest")
-            # crop foreground region
-            z_fine_masked_cropped = self._get_foreground_bbox(mask_fine)
-            z_coarse_masked_cropped = self._get_foreground_bbox(mask_coarse, use_shape_on_background=True)
-            # resize fine foregrounds to coarse's size
-            z_fine_reshaped, mask_fine_reshaped = [], []
-            for i in range(b - 1):
-                if z_fine_masked_cropped[0] is not None and z_coarse_masked_cropped[i] is not None:
-                    z_fine_reshaped.append(self._interpolate(z_fine[*z_fine_masked_cropped[0]], z_coarse[*z_coarse_masked_cropped[i]].shape[2:], mode="trilinear"))
-                    mask_fine_reshaped.append(self._interpolate(mask_fine[*z_fine_masked_cropped[0]], mask_coarse[*z_coarse_masked_cropped[i]].shape[2:], mode="nearest"))
-                else:
-                    if z_coarse_masked_cropped[i] is None:
-                        z_coarse_masked_cropped[i] = [slice(0, z_coarse[i].shape[j] + 1) for j in range(len(z_coarse[i].shape))]
-                    z_fine_reshaped.append(z_coarse[*z_coarse_masked_cropped[i]])
-                    mask_fine_reshaped.append(mask_coarse[*z_coarse_masked_cropped[i]])
-            # mixup
-            z_local_mix = [z_fine_reshaped[i] * (1 - alpha) + z_coarse[*z_coarse_masked_cropped[i]] * alpha for i in range(b - 1)]
-            mask_local_mix = [mask_fine_reshaped[i] * (1 - alpha) + mask_coarse[*z_coarse_masked_cropped[i]] * alpha for i in range(b - 1)]
-            for i in range(b - 1): z_coarse[i, *z_coarse_masked_cropped[i][1:]] = z_local_mix[i]
-            for i in range(b - 1): mask_coarse[i, *z_coarse_masked_cropped[i][1:]] = mask_local_mix[i]
-            z_mix = torch.cat([z_fine, z_coarse], dim=0)
-            mask_mix = torch.cat([mask_fine, mask_coarse], dim=0)
+            z_fines = z[:primary_batch_size]
+            z_mix, mask_mix, mix_log = [], [], []
+            for b in range(primary_batch_size):
+                z_fine = z_fines[b: b + 1]
+                z_coarse = samples[primary_batch_size:]
+                # convert mask shape to match latent shape
+                mask_fine = self._interpolate(cx[b: b+1].to(torch.float32), z_fine.shape[2:], mode="nearest")
+                mask_coarse = self._interpolate((cx[primary_batch_size:] > 0).to(torch.float32), z_coarse.shape[2:], mode="nearest")
+                # crop foreground region
+                z_fine_masked_cropped = self._get_foreground_bbox(mask_fine)
+                z_coarse_masked_cropped = self._get_foreground_bbox(mask_coarse, use_shape_on_background=True)
+                # resize fine foregrounds to coarse's size
+                z_fine_reshaped, mask_fine_reshaped = [], []
+                for i in range(B - primary_batch_size):
+                    if z_fine_masked_cropped[0] is not None and z_coarse_masked_cropped[i] is not None:
+                        mix_log.append("ok")
+                        z_fine_reshaped.append(self._interpolate(z_fine[*z_fine_masked_cropped[0]], z_coarse[*z_coarse_masked_cropped[i]].shape[2:], mode="trilinear"))
+                        mask_fine_reshaped.append(self._interpolate(mask_fine[*z_fine_masked_cropped[0]], mask_coarse[*z_coarse_masked_cropped[i]].shape[2:], mode="nearest"))
+                    else:
+                        if z_coarse_masked_cropped[i] is None:
+                            mix_log.append("nocrop-C")
+                            z_coarse_masked_cropped[i] = [slice(0, z_coarse[i].shape[j] + 1) for j in range(len(z_coarse[i].shape))]
+                        mix_log.append("nocrop-F")
+                        z_fine_reshaped.append(z_coarse[*z_coarse_masked_cropped[i]])
+                        mask_fine_reshaped.append(mask_coarse[*z_coarse_masked_cropped[i]])
+                # mixup
+                z_local_mix, mask_local_mix = [], []
+                for i in range(B - primary_batch_size):
+                    z_fine_reshaped[i][:, :, mask_fine_reshaped[i][0, 0] == 0] = z_coarse[*z_coarse_masked_cropped[i]][:, :, mask_fine_reshaped[i][0, 0] == 0]
+                    mask_fine_reshaped[i][:, :, mask_fine_reshaped[i][0, 0] == 0] = mask_coarse[*z_coarse_masked_cropped[i]][:, :, mask_fine_reshaped[i][0, 0] == 0]
+                    z_local_mix.append(z_fine_reshaped[i] * (1 - alpha) + z_coarse[*z_coarse_masked_cropped[i]] * alpha)
+                    mask_local_mix.append(mask_fine_reshaped[i] * (1 - alpha))
+                    
+                for i in range(B - primary_batch_size): z_coarse[i, *z_coarse_masked_cropped[i][1:]] = z_local_mix[i]
+                for i in range(B - primary_batch_size): mask_coarse[i, *z_coarse_masked_cropped[i][1:]] = mask_local_mix[i]
+                z_mix.append(z_coarse)
+                mask_mix.append(self._interpolate(mask_coarse, cx.shape[2:], mode="trilinear"))
             
-            x_samples = self.decode_first_stage(z_mix, cf)
-            logs["samples_mixed"] = x_samples
-            logs["mask_mixed"] = mask_mix
+            z_mix, mask_mix = map(lambda x: torch.cat(x, dim=0), [z_mix, mask_mix])
+            x_samples = self.decode_first_stage(z_mix, cx[primary_batch_size:])
+            logs["mixed_samples"] = x_samples
+            logs["mixed_fine"] = mask_mix
+            logs["mixed_coarse"] = ((mask_mix > 0) | (cx[primary_batch_size:] > 0)).float()
+            logs["mix_log"] = ','.join(mix_log)
             
         return logs

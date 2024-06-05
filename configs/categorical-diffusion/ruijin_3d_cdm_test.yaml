@@ -1,6 +1,6 @@
 model:
   base_learning_rate: 2e-5
-  target: ldm.models.diffusion.ccdm.CategoricalDiffusion
+  target: inference.models.InferCategoricalDiffusion
   params:
     linear_start: 1e-2
     linear_end: 0.2
@@ -11,17 +11,11 @@ model:
     cond_key: context
     parameterization: x0
     conditioning_key: crossattn
-    monitor: val/dir_loss
+    monitor: val/lpips_metric_epoch
     cond_stage_trainable: false
-    use_scheduler: true 
-    scheduler_config:
-      target: torch.optim.lr_scheduler.LinearLR
-      params:
-        start_factor: 1
-        end_factor: 1e-3
-        total_iters: 500
     use_automatic_optimization: false
     class_weights: [1,1,1,1,1,1,1,1,1,1,1,1]
+    ckpt_path: /ailab/user/dailinrui/data/ldm/ruijin_cdm_96_192_192_x0_v3/checkpoints/last-v1.ckpt
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.CCDMUNetModel
@@ -54,32 +48,26 @@ model:
         coeff: 1
 
 data:
-  target: main.DataModuleFromConfig
+  target: test.DataModuleFromConfig
   params:
     batch_size: 1
     num_workers: 12
     wrap: false
-    train:
+    test:
       target: ldm.data.ruijin.Ruijin_3D
       params:
-        split: train
+        split: test
         resize_to: [64, 128, 128]
-        max_size: 5
-    validation:
-      target: ldm.data.ruijin.Ruijin_3D
-      params:
-        split: val
-        resize_to: [64, 128, 128]
-        max_size: 5
 
 lightning:
   callbacks:
     image_logger:
-      target: main.ImageLogger
+      target: test.ImageLogger
       params:
-        train_batch_frequency: 200
-        val_batch_frequency: 1
+        test_batch_frequency: 1
         max_images: 10
+        log_images_kwargs:
+          verbose: true
         logger:
           inputs: 
             target: mask_rescale
@@ -90,7 +78,7 @@ lightning:
             params: 
               n_mask: 11
           samples:
-            target: image_rescale
+            target: mask_rescale
             params: 
               n_mask: 11
 

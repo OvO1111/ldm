@@ -5,12 +5,18 @@ import numpy as np
 import SimpleITK as sitk
 
 from enum import IntEnum
+from tqdm import tqdm
 from einops import rearrange, repeat
-from torch.nn.functional import interpolate
 from ldm.util import instantiate_from_config
-from ldm.models.diffusion.ccdm import CategoricalDiffusion
-from ldm.models.diffusion.ddpm import LatentDiffusion, Img2MaskDiffusion
 from ldm.models.autoencoder import AutoencoderKL, VQModel
+from ldm.models.diffusion.ddpm import LatentDiffusion, Img2MaskDiffusion
+from ldm.models.diffusion.ccdm import CategoricalDiffusion, OneHotCategoricalBCHW
+
+from ldm.modules.diffusionmodules.util import extract_into_tensor
+
+
+def exists(x):
+    return x is not None
 
 
 class MetricType(IntEnum):
@@ -125,7 +131,7 @@ class ComputeMetrics:
     
 
 class InferAutoencoderKL(AutoencoderKL, ComputeMetrics):
-    def __init__(self, eval_scheme, **autoencoder_kwargs):
+    def __init__(self, eval_scheme=[1], **autoencoder_kwargs):
         AutoencoderKL.__init__(self, **autoencoder_kwargs)
         ComputeMetrics.__init__(self, eval_scheme)
         self.eval()
@@ -151,10 +157,11 @@ class InferAutoencoderKL(AutoencoderKL, ComputeMetrics):
             # print(metrics)
             self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             return metrics, logs
+        return {}, logs
         
     
 class InferLatentDiffusion(LatentDiffusion, ComputeMetrics):
-    def __init__(self, eval_scheme, **diffusion_kwargs):
+    def __init__(self, eval_scheme=[1], **diffusion_kwargs):
         LatentDiffusion.__init__(self, **diffusion_kwargs)
         ComputeMetrics.__init__(self, eval_scheme)
         self.eval()
@@ -185,7 +192,7 @@ class InferLatentDiffusion(LatentDiffusion, ComputeMetrics):
     
 
 class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics):
-    def __init__(self, eval_scheme, **diffusion_kwargs):
+    def __init__(self, eval_scheme=[1], **diffusion_kwargs):
         CategoricalDiffusion.__init__(self, **diffusion_kwargs)
         ComputeMetrics.__init__(self, eval_scheme)
         self.eval()
@@ -201,8 +208,83 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics):
         pass
     
     @torch.no_grad()
-    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, *args, **kwargs):
-        logs = super(InferCategoricalDiffusion, self).log_images(batch, *args, **kwargs)
+    def p_sample(self, q_xT=None, c=None, verbose=False, plot_denoise_rows=False, plot_progressive_rows=False, plot_diffusion_rows=False):
+        logs = dict()
+        with self.ema_scope():
+            c = c if exists(c) else dict()
+            p_xt, b = q_xT, q_xT.shape[0]
+            t_values = reversed(range(1, self.timesteps)) if not verbose else tqdm(reversed(range(1, self.timesteps)), total=self.timesteps, desc="sampling progress")
+            for t in t_values:
+                t_ = torch.full(size=(b,), fill_value=t, device=q_xT.device)
+                model_outputs = self.model(p_xt, t_, **c)
+                if isinstance(model_outputs, dict): 
+                    model_outputs = model_outputs["diffusion_out"]
+                    
+                if self.parameterization == "eps":
+                    alphas_t = extract_into_tensor(self.alphas, t_, p_xt.shape)
+                    p_x0_given_xt = (p_xt - (1 - alphas_t) * model_outputs) / alphas_t
+                elif self.parameterization == "x0":
+                    p_x0_given_xt = model_outputs
+                    
+                eps = self.get_noise(torch.zeros_like(q_xT))
+                p_xt = torch.clamp(self.q_xtm1_given_x0_xt(p_xt, p_x0_given_xt, t_, eps), min=1e-12)
+                
+                if self.parameterization == "kl":
+                    p_x0_given_xt = model_outputs
+                    p_xt = torch.clamp(self.q_xtm1_given_x0pred_xt(p_xt, p_x0_given_xt, t_), min=1e-12)
+                    p_xt = OneHotCategoricalBCHW(probs=p_xt).sample()
+                
+        if self.p_x1_sample == "majority":
+            x0pred = OneHotCategoricalBCHW(probs=p_xt).max_prob_sample()
+        elif self.p_x1_sample == "confidence":
+            x0pred = OneHotCategoricalBCHW(probs=p_xt).prob_sample()
+            
+        logs["samples"] = x0pred.argmax(1)
+        return logs
+    
+    @torch.no_grad()
+    def p_sample_ddim(self, q_xT, c, ddim_timesteps, verbose=False):
+        logs = dict()
+        
+        def q_xtm1_given_x0_xt_ddim(xt, x0, ddim_t, ddim_tm1, noise):
+            # computes q_xtm1 given q_xt, q_x0, noise
+            alphas_t = extract_into_tensor(self.alphas, ddim_t, x0.shape)
+            alphas_cumprod_tm1 = extract_into_tensor(self.alphas_cumprod_prev, ddim_tm1, x0.shape)
+            if exists(noise): theta = ((alphas_t * xt + (1 - alphas_t) * noise) * (alphas_cumprod_tm1 * x0 + (1 - alphas_cumprod_tm1) * noise))
+            else: theta = ((alphas_t * xt + (1 - alphas_t) / self.num_classes) * (alphas_cumprod_tm1 * x0 + (1 - alphas_cumprod_tm1) / self.num_classes))
+            return theta / theta.sum(dim=1, keepdim=True)
+        
+        p_xt, b = q_xT, q_xT.shape[0]
+        t_values = list(reversed(range(1, len(ddim_timesteps)))) 
+        iterator = t_values if not verbose else tqdm(t_values, total=len(ddim_timesteps), desc="ddim sampling progress")
+        for index, t in enumerate(iterator):
+            t_ = torch.full(size=(b,), fill_value=ddim_timesteps[t], device=q_xT.device)
+            t_m1 = torch.full(size=(b,), fill_value=ddim_timesteps[t_values[index + 1] if index + 1 < len(t_values) else 0], device=q_xT.device)
+            
+            model_outputs = self.model(p_xt, t_, **c)
+            if isinstance(model_outputs, dict): 
+                model_outputs = model_outputs["diffusion_out"]
+                
+            if self.parameterization == "eps":
+                alphas_t = extract_into_tensor(self.alphas, t_, p_xt.shape)
+                p_x0_given_xt = (p_xt - (1 - alphas_t) * model_outputs) / alphas_t
+            elif self.parameterization == "x0":
+                p_x0_given_xt = model_outputs
+                
+            eps = self.get_noise(torch.zeros_like(q_xT))
+            p_xt = torch.clamp(q_xtm1_given_x0_xt_ddim(p_xt, p_x0_given_xt, t_, t_m1, eps), min=1e-12)
+            
+        if self.p_x1_sample == "majority":
+            x0pred = OneHotCategoricalBCHW(probs=p_xt).max_prob_sample()
+        elif self.p_x1_sample == "confidence":
+            x0pred = OneHotCategoricalBCHW(probs=p_xt).prob_sample()
+            
+        logs["samples"] = x0pred.argmax(1)
+        return logs
+    
+    @torch.no_grad()
+    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, **kwargs):
+        logs = super(InferCategoricalDiffusion, self).log_images(batch, **kwargs)
         x = logs["inputs"]
         x_recon = logs["samples"]
         
@@ -211,6 +293,7 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics):
             # print(metrics)
             self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             return metrics, logs
+        return {}, logs
         
 
 class InferMixedDiffusion(InferLatentDiffusion):
@@ -261,6 +344,7 @@ class InferMixedDiffusion(InferLatentDiffusion):
         ddim_steps = kwargs.get("ddim_steps", 200)
         use_ddim = kwargs.get("ddim_steps", 200) is not None
         # the first item is finely labeled, while the rest are not
+        cx = batch["mask"]
         cf = None if not self.first_stage_model.is_conditional else super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key)
         
         if sample:
@@ -274,8 +358,8 @@ class InferMixedDiffusion(InferLatentDiffusion):
                 z_fine = z_fines[b: b + 1]
                 z_coarse = samples[primary_batch_size:]
                 # convert mask shape to match latent shape
-                mask_fine = self._interpolate((cf[b: b+1] > 0).to(torch.float32), z_fine.shape[2:], mode="nearest")
-                mask_coarse = self._interpolate((cf[primary_batch_size:] > 0).to(torch.float32), z_coarse.shape[2:], mode="nearest")
+                mask_fine = self._interpolate(cx[b: b+1].to(torch.float32), z_fine.shape[2:], mode="nearest")
+                mask_coarse = self._interpolate((cx[primary_batch_size:] > 0).to(torch.float32), z_coarse.shape[2:], mode="nearest")
                 # crop foreground region
                 z_fine_masked_cropped = self._get_foreground_bbox(mask_fine)
                 z_coarse_masked_cropped = self._get_foreground_bbox(mask_coarse, use_shape_on_background=True)
@@ -304,12 +388,13 @@ class InferMixedDiffusion(InferLatentDiffusion):
                 for i in range(B - primary_batch_size): z_coarse[i, *z_coarse_masked_cropped[i][1:]] = z_local_mix[i]
                 for i in range(B - primary_batch_size): mask_coarse[i, *z_coarse_masked_cropped[i][1:]] = mask_local_mix[i]
                 z_mix.append(z_coarse)
-                mask_mix.append(self._interpolate(mask_coarse, cf.shape[2:], mode="trilinear"))
+                mask_mix.append(self._interpolate(mask_coarse, cx.shape[2:], mode="trilinear"))
             
             z_mix, mask_mix = map(lambda x: torch.cat(x, dim=0), [z_mix, mask_mix])
-            x_samples = self.decode_first_stage(z_mix, cf[primary_batch_size:])
-            logs["samples_mixed"] = x_samples
-            logs["mask_mixed"] = mask_mix
+            x_samples = self.decode_first_stage(z_mix, cx[primary_batch_size:])
+            logs["mixed_samples"] = x_samples
+            logs["mixed_fine"] = mask_mix
+            logs["mixed_coarse"] = ((mask_mix > 0) | (cx[primary_batch_size:] > 0)).float()
             logs["mix_log"] = ','.join(mix_log)
             
         x = logs["inputs"]
