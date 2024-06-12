@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 2e-5
+  base_learning_rate: 5e-5
   target: inference.models.InferCategoricalDiffusion
   params:
     linear_start: 1e-2
@@ -9,12 +9,17 @@ model:
     num_classes: 12  # include background class
     data_key: mask
     cond_key: context
-    parameterization: x0
     conditioning_key: crossattn
     monitor: val/lpips_metric_epoch
     cond_stage_trainable: false
     use_automatic_optimization: false
     class_weights: [1,1,1,1,1,1,1,1,1,1,1,1]
+    # use or not use legacy from ccdm.git
+    # use_legacy: true
+    # parameterization: kl
+    # ckpt_path: /ailab/user/dailinrui/data/ccdm/ruijin_ccdm_64_128_128_baseline/checkpoint/checkpoint_ep64_gs168155.ckpt
+    use_legacy: false
+    parameterization: x0
     ckpt_path: /ailab/user/dailinrui/data/ldm/ruijin_cdm_96_192_192_x0_v3/checkpoints/last-v1.ckpt
 
     unet_config:
@@ -68,6 +73,8 @@ lightning:
         max_images: 10
         log_images_kwargs:
           verbose: true
+          plot_denoising_rows: true
+          plot_progressive_rows: true
         logger:
           inputs: 
             target: mask_rescale

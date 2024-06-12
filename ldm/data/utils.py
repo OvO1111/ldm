@@ -1,20 +1,88 @@
-import os, os.path as path, yaml, pathlib as pb
+import os, os.path as path, pathlib as pb
 import json, torchio as tio, shutil, nibabel as nib
-import re, SimpleITK as sitk, scipy.ndimage as ndimage, numpy as np, multiprocessing as mp
+import re, scipy.ndimage as ndimage, numpy as np
 
 import torch
 
-from tqdm import tqdm
-from einops import rearrange
+from typing import List
 from datetime import datetime
-from functools import reduce, partial
-from collections import OrderedDict, defaultdict
+from functools import reduce
+from collections import defaultdict, namedtuple
+from collections.abc import MutableMapping
+
+
+OrganTypeBase = namedtuple("OrganTypeBase", ["name", "label"])
+    
+
+class TotalsegOrganType:
+    def __init__(self, path):
+        self.max_split = 0
+        self.organtypes = dict()
+        self.nested_organtypes = dict()
+        with open(path) as f:
+            for line in f.readlines():
+                index, name, alias = line.split('\t')
+                index = int(index)
+                name_split = name.split('_')
+                self.max_split = max(self.max_split, len(name_split))
+                key = reduce(lambda x, y: x + y[0].upper() + y[1:], name_split)
+                self.organtypes[key[0].upper() + key[1:]] = index
+                
+                nested_type = self.nested_organtypes
+                while len(name_split) > 0:
+                    name_split_pop = name_split.pop(0)
+                    name_split_pop = name_split_pop[0].upper() + name_split_pop[1:]
+                    if name_split_pop not in nested_type: 
+                        nested_type[name_split_pop] = {} 
+                        if len(name_split) == 0: nested_type[name_split_pop] = index
+                    nested_type = nested_type[name_split_pop]
+                    
+        self.organtypes["Background"] = 0
+        self.nested_organtypes["Background"] = 0
+        
+        _flatten_dict = dict()
+        def _flatten_dict_values(d: MutableMapping, parent_key='') -> MutableMapping:
+            items = []
+            for k, v in d.items():
+                new_key = parent_key + k if parent_key else k
+                if isinstance(v, MutableMapping):
+                    items.extend(_flatten_dict_values(v, new_key))
+                else:
+                    items.append(v)
+            if parent_key: _flatten_dict[parent_key] = items
+            return items
+
+        _flatten_dict_values(self.nested_organtypes)
+        self.organtypes.update(_flatten_dict)
+
+TotalsegOrganTypeV1 = TotalsegOrganType("/ailab/user/dailinrui/code/latentdiffusion/dependency/totalseg_v1_label_mapping.txt")
+TotalsegOrganTypeV2 = TotalsegOrganType("/ailab/user/dailinrui/code/latentdiffusion/dependency/totalseg_v2_label_mapping.txt")
+
+
+class LabelParser:
+    def __init__(self, totalseg_version="v1"):
+        self.totalseg_version = totalseg_version
+        self.totalseg_decoder = TotalsegOrganTypeV1 if totalseg_version == "v1" else TotalsegOrganTypeV2
+        # self.totalseg_mapping = self.totalseg_decoder.load(merge_level)
+        
+    def totalseg2mask(self, label, organtype: List[OrganTypeBase]=None):
+        if organtype is None: return label
+        label_ = np.zeros_like(label) if isinstance(label, np.ndarray) else torch.zeros_like(label) 
+        for organ in organtype:
+            label_index = organ.label
+            totalseg_indices = self.totalseg_decoder.organtypes[organ.name]
+            if isinstance(totalseg_indices, int): totalseg_indices = [totalseg_indices]
+            for totalseg_index in totalseg_indices:
+                label_[label == totalseg_index] = label_index
+        return label_
 
 
 def identity(x, *a, **b): return x
 
 
-def conserve_only_certain_labels(label, designated_labels=[1, 2, 3, 5, 6, 10, 55, 56, 57, 104]):
+def conserve_only_certain_labels(label,
+                                 designated_labels=[1, 2, 3, 5, 6, 10, 55, 56, 57, 104],
+                                 totalseg_version="v1"):
     if isinstance(label, np.ndarray):
         if designated_labels is None:
             return label.astype(np.uint8)
@@ -125,6 +193,7 @@ class TorchioForegroundCropper(tio.transforms.Transform):
         # data: c h w d
         subject_ = {k: v.data for k, v in data.items()}
         type_ = {k: v.type for k, v in data.items()}
+        class_ = {k: tio.ScalarImage if isinstance(v, tio.ScalarImage) else tio.LabelMap for k, v in data.items()}
 
         if self.crop_level == "all":
             return data
@@ -145,7 +214,7 @@ class TorchioForegroundCropper(tio.transforms.Transform):
             
             padder = identity if pw + ph + pd == 0 else lambda x: torch.nn.functional.pad(x, (pd, pd, ph, ph, pw, pw), mode='constant', value=0)
             cropper = [slice(w1, w1 + output_size[0]), slice(h1, h1 + output_size[1]), slice(d1, d1 + output_size[2])]
-            subject_ = {k: tio.Image(tensor=padder(v)[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
+            subject_ = {k: class_[k](tensor=padder(v)[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
             
         outline = self.crop_kwargs.get("outline", [0] * 6)
         if isinstance(outline, int): outline = [outline] * 6
@@ -158,7 +227,7 @@ class TorchioForegroundCropper(tio.transforms.Transform):
             cropper = [slice(max(0, s1 - outline[0]), min(e1 + 1 + outline[1], image_.shape[1])),
                        slice(max(0, s2 - outline[2]), min(e2 + 1 + outline[3], image_.shape[2])),
                        slice(max(0, s3 - outline[4]), min(e3 + 1 + outline[5], image_.shape[3]))]
-            subject_ = {k: tio.Image(tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
+            subject_ = {k: class_[k](tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
         
         if self.crop_level == "mask_foreground":
             mask_ = conserve_only_certain_labels(subject_[self.crop_anchor], self.crop_kwargs.get("foreground_mask_label", None))
@@ -168,7 +237,7 @@ class TorchioForegroundCropper(tio.transforms.Transform):
             cropper = [slice(max(0, s1 - outline[0]), min(e1 + 1 + outline[1], mask_.shape[1])),
                        slice(max(0, s2 - outline[2]), min(e2 + 1 + outline[3], mask_.shape[2])),
                        slice(max(0, s3 - outline[4]), min(e3 + 1 + outline[5], mask_.shape[3]))]
-            subject_ = {k: tio.Image(tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
+            subject_ = {k: class_[k](tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
             
         return tio.Subject(subject_)
             

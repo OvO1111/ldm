@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
-from functools import partial
+from functools import partial, reduce
 from einops import rearrange, repeat
+import re
+import numpy as np
 # import clip
 # import kornia
 
-
+from transformers import AutoTokenizer, AutoModel
 from ldm.modules.x_transformer import Encoder, TransformerWrapper  # TODO: can we directly rely on lucidrains code and simply add this as a reuirement? --> test
 
 
@@ -273,7 +275,7 @@ class CategoricalDiffusionWrapper(nn.Module):
         return x.argmax(1, keepdim=True)
     
     
-class DummyFirstStage(nn.Module):
+class IdentityFirstStage(nn.Module):
     def __init__(self):
         super().__init__()
         self.dummy = nn.Identity()
@@ -283,3 +285,90 @@ class DummyFirstStage(nn.Module):
     
     def decode(self, p, c=None):
         return self.dummy(p)
+    
+    
+class FrozenBERTEmbedder(AbstractEncoder):
+    use_text_split = False
+    bert_max_length = 512
+    def __init__(self, ckpt_path="/ailab/user/dailinrui/data/dependency/bert-ernie-health",
+                 device="cuda", freeze=True, max_length=512):
+        super().__init__()
+        self.device = device
+        self.max_length = max_length
+        self.bert_max_length = 512
+        assert self.max_length % self.bert_max_length == 0 or self.max_length < self.bert_max_length
+        self.bert_encode_batch = self.max_length // self.bert_max_length
+        self.tokenizer = AutoTokenizer.from_pretrained(ckpt_path, local_files_only=True)
+        self.transformer = AutoModel.from_pretrained(ckpt_path, local_files_only=True).to(self.device)
+        if freeze:
+            self.freeze()
+
+    def freeze(self):
+        self.transformer = self.transformer.eval()
+        #self.train = disabled_train
+        for param in self.parameters():
+            param.requires_grad = False
+
+    @staticmethod
+    def token_split(string, max_length=bert_max_length):
+        if len(string) < max_length:
+            return [string]
+        split_pos = [0] + [m.start() for m in re.finditer(r"\\\\|{", string)] + [len(string)]
+        split_text = [string[split_pos[i]: split_pos[i+1]] for i in range(len(split_pos)-1)]
+
+        def huffman_grouping(*t):
+            if len(t) == 1:
+                return t
+            pair_len = [len(t[_] + t[_+1]) for _ in range(len(t)-1)]
+            if min(pair_len) > max_length:
+                return t
+            pair_idx = np.argmin(pair_len)
+            pair_t = t[pair_idx] + t[pair_idx + 1]
+            if pair_idx + 2 < len(t):
+                return huffman_grouping(*t[:pair_idx], pair_t, *t[pair_idx+2:])
+            return huffman_grouping(*t[:pair_idx], pair_t)
+
+        result_ls = huffman_grouping(*split_text)
+
+        if max([len(_) for _ in result_ls]) > max_length:  # sep by "。"
+            split_pos = [0] + [m.start() for m in re.finditer(r"。", string)] + [len(string)]
+            split_text = [string[split_pos[i]: split_pos[i+1]] for i in range(len(split_pos)-1)]
+            result_ls = huffman_grouping(*split_text)
+
+        return result_ls
+
+    def _merge_text_list(self, *ls):
+        ls_ = []
+        for l in ls:
+            ls_.append(l)
+            if not isinstance(l, list):
+                assert isinstance(l:= str(l), str), f"got type {type(l)} for {l}, attempted conversion to str failed"
+                ls_[-1] = self.token_split(l)
+            if len(ls_[-1]) < self.bert_encode_batch:
+                ls_[-1].append("")
+            if len(ls_[-1]) > self.bert_encode_batch:
+                ls_[-1] = l[:self.bert_encode_batch]
+        return reduce(lambda x, y: x + y, ls_, [])
+
+    def forward(self, text):
+        if isinstance(text, str): text = [text]
+        b = len(text)
+        if self.use_text_split:
+            text = self._merge_text_list(*text)
+        batch_encoding = self.tokenizer(text, truncation=True, max_length=self.bert_max_length, return_length=True,
+                                        return_overflowing_tokens=False, padding="max_length", return_tensors="pt")
+        tokens = batch_encoding["input_ids"].to(self.device)
+        mask = batch_encoding["attention_mask"].to(self.device)
+        outputs = self.transformer(input_ids=tokens, attention_mask=mask, return_dict=True)
+
+        z = outputs.last_hidden_state
+        z = rearrange(z, "(b x) n l -> b (n x) l", b=b, x=self.bert_encode_batch, n=self.bert_max_length)
+        return z
+
+    def encode(self, text):
+        return self(text)
+
+
+class IdentityEncoder(nn.Module):
+    def encode(self, tensor):
+        return tensor

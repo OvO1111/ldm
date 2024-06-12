@@ -92,10 +92,6 @@ class ImageLogger(Callback):
         super().__init__()
         self.batch_freq = test_batch_frequency
         self.max_images = max_images
-        self.logger_log_images = {
-            WandbLogger: self._wandb,
-            TensorBoardLogger: self._board
-        }
         self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
         self.clamp = clamp
         self.disabled = disabled
@@ -122,18 +118,6 @@ class ImageLogger(Callback):
         self.log_metrics = log_metrics
         for name, val in logger.items():
             self.logger[name] = _get_logger(val["target"], val.get("params"))
-            
-    @rank_zero_only
-    def _board(self, pl_module, images, batch_idx, split):
-        for k in images:
-            _im = images[k]
-            pl_module.logger.experiment.add_image(f"{split}_{k}", _im.transpose(2, 0, 1), batch_idx)
-            
-    @rank_zero_only
-    def _wandb(self, pl_module, images, batch_idx, split):
-        for k in images:
-            _im = images[k]
-            pl_module.logger.experiment.log({f"{split}_{k}": [wandb.Image(_im)]})
             
     @staticmethod
     def _maybe_mkdir(path):
@@ -202,8 +186,8 @@ class ImageLogger(Callback):
             local_images = self.log_local(pl_module.logger.save_dir, split, images,
                                           pl_module.global_step, pl_module.current_epoch, batch_idx, metrics)
 
-            logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
-            logger_log_images(pl_module, local_images, batch_idx, split)
+            # logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
+            # logger_log_images(pl_module, local_images, batch_idx, split)
 
     def check_frequency(self, check_idx, split="test"):
         log_steps = self.log_steps

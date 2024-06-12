@@ -12,6 +12,7 @@ from ldm.models.autoencoder import AutoencoderKL, VQModel
 from ldm.models.diffusion.ddpm import LatentDiffusion, Img2MaskDiffusion
 from ldm.models.diffusion.ccdm import CategoricalDiffusion, OneHotCategoricalBCHW
 
+from ldm.models.diffusion.ddim import make_ddim_timesteps
 from ldm.modules.diffusionmodules.util import extract_into_tensor
 
 
@@ -48,10 +49,12 @@ class ComputeMetrics:
     def log_eval(self, x, y, log_group_metrics_in_2d=False):
         metrics = dict()
         b, c, *shp = x.shape
+        assert x.shape == y.shape
         
         if MetricType.lpips in self.eval_scheme:
             # lower = better (0, ?)
             perceptual = self.perceptual
+            if c != 1: x, y = map(lambda i: i[:, 0:1], [x, y])
             x, y = map(lambda i: repeat(i, 'b 1 d h w -> b c d h w', c=3), [x, y])
             if len(shp) == 3:
                 lpips_x = perceptual(rearrange(x, "b c d h w -> (b d) c h w"),
@@ -70,8 +73,7 @@ class ComputeMetrics:
             if MetricType.fid in self.eval_scheme:
                 # lower = better (0, inf)
                 assert len(shp) == 3
-                x = rearrange(x, "b c h ... -> (b h) 1 c ...")
-                y = rearrange(y, "b c h ... -> (b h) 1 c ...")
+                x, y = map(lambda i: rearrange(i, "b c h ... -> (b h) 1 c ..."), [x, y])
                 # resize x and y to (3, 299, 299)
                 x, y = map(lambda x: torch.nn.functional.interpolate(x, (3, 299, 299)).squeeze(1), [x, y])
                 self.fid.update(x.float(), real=False)
@@ -208,12 +210,53 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics):
         pass
     
     @torch.no_grad()
-    def p_sample(self, q_xT=None, c=None, verbose=False, plot_denoise_rows=False, plot_progressive_rows=False, plot_diffusion_rows=False):
+    def _log_images(self, batch, split="train", sample=True, use_ddim=False, ddim_steps=50, ddim_eta=1., verbose=False, **kwargs):
+        x0, c = self.get_input(batch, self.data_key, self.cond_key)
+        noise = self.get_noise(x0)
+        
+        logs = dict()
+        b = x0.shape[0]
+        logs["inputs"] = x0.argmax(1)
+        logs["conditioning"] = str(batch["text"])
+        if sample:
+            t = torch.randint(950, self.num_timesteps, (b,), device=self.device).long()
+            q_xt = self.q_xt_given_x0(x0, t, noise)
+            model_outputs = self.model(q_xt, t, **c)
+            if isinstance(model_outputs, dict): 
+                model_outputs = model_outputs["diffusion_out"]
+            x0pred = OneHotCategoricalBCHW(model_outputs).max_prob_sample()
+            
+            logs["t"] = str(t.cpu().numpy().tolist())
+            logs["xt"] = OneHotCategoricalBCHW(q_xt).sample().argmax(1)
+            logs["no_ddim_x0pred"] = x0pred.argmax(1)
+            
+            lpips = self.lpips_loss(x0pred.argmax(1, keepdim=True), x0.argmax(1, keepdim=True))
+            self.log(f"{split}/lpips_metric", lpips, prog_bar=True, on_step=True)
+            
+            if not use_ddim: logs = logs | self.p_sample(q_xt, c, verbose=verbose, **kwargs)
+            else: logs = logs | self.p_sample_ddim(q_xt, c, make_ddim_timesteps("uniform", 
+                                                                                    num_ddim_timesteps=ddim_steps, 
+                                                                                    num_ddpm_timesteps=self.timesteps,
+                                                                                    verbose=verbose), verbose=verbose, **kwargs)
+            x0pred = logs["samples"]
+
+            lpips = self.lpips_loss(x0pred.unsqueeze(1), x0.argmax(1, keepdim=True))
+            self.log(f"{split}/lpips_metric", lpips, prog_bar=True, on_step=True)
+            
+        return logs
+    
+    @torch.no_grad()
+    def p_sample(self, q_xT=None, c=None, verbose=False, 
+                 plot_progressive_rows=False, 
+                 plot_denoising_rows=False, plot_diffusion_every_t=200):
         logs = dict()
         with self.ema_scope():
             c = c if exists(c) else dict()
             p_xt, b = q_xT, q_xT.shape[0]
-            t_values = reversed(range(1, self.timesteps)) if not verbose else tqdm(reversed(range(1, self.timesteps)), total=self.timesteps, desc="sampling progress")
+            t_values = reversed(range(1, self.timesteps + 1)) if not verbose else tqdm(reversed(range(1, self.timesteps + 1)), total=self.timesteps, desc="sampling progress")
+            
+            if plot_denoising_rows: denoising_rows = []
+            if plot_progressive_rows: progressive_rows = []
             for t in t_values:
                 t_ = torch.full(size=(b,), fill_value=t, device=q_xT.device)
                 model_outputs = self.model(p_xt, t_, **c)
@@ -225,34 +268,63 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics):
                     p_x0_given_xt = (p_xt - (1 - alphas_t) * model_outputs) / alphas_t
                 elif self.parameterization == "x0":
                     p_x0_given_xt = model_outputs
-                    
-                eps = self.get_noise(torch.zeros_like(q_xT))
-                p_xt = torch.clamp(self.q_xtm1_given_x0_xt(p_xt, p_x0_given_xt, t_, eps), min=1e-12)
                 
                 if self.parameterization == "kl":
                     p_x0_given_xt = model_outputs
                     p_xt = torch.clamp(self.q_xtm1_given_x0pred_xt(p_xt, p_x0_given_xt, t_), min=1e-12)
                     p_xt = OneHotCategoricalBCHW(probs=p_xt).sample()
+                else:
+                    # alphas_t = extract_into_tensor(self.alphas, t_, p_xt.shape)
+                    # cumalphas_t = extract_into_tensor(self.alphas_cumprod, t_, p_xt.shape)
+                    # cumalphas_tm1 = cumalphas_t / alphas_t
+                    # xt_coeff = (alphas_t - cumalphas_t) / (1 - cumalphas_t)
+                    # x0_coeff = alphas_t * (cumalphas_tm1 - cumalphas_t) ** 2 / (1 - cumalphas_t) ** 2
+                    # p_xt = torch.clamp(xt_coeff * p_xt ** 2 + x0_coeff * (p_x0_given_xt * p_xt - p_x0_given_xt ** 2), min=1e-12)
+                    # p_xt = p_xt / p_xt.sum(1, keepdim=True)
+                    eps = self.get_noise(torch.zeros_like(q_xT))
+                    p_xt = torch.clamp(self.q_xtm1_given_x0_xt(p_xt, p_x0_given_xt, t_, eps), min=1e-12)
                 
+                if plot_denoising_rows and t % plot_diffusion_every_t == 0: denoising_rows.append(p_x0_given_xt)
+                if plot_progressive_rows and t % plot_diffusion_every_t == 0: progressive_rows.append(p_xt)
+
         if self.p_x1_sample == "majority":
             x0pred = OneHotCategoricalBCHW(probs=p_xt).max_prob_sample()
         elif self.p_x1_sample == "confidence":
             x0pred = OneHotCategoricalBCHW(probs=p_xt).prob_sample()
             
         logs["samples"] = x0pred.argmax(1)
+        if plot_denoising_rows:
+            denoising_rows = OneHotCategoricalBCHW(probs=torch.cat(denoising_rows, dim=0)).max_prob_sample()
+            logs["p(x0|xt) at different timestep"] = denoising_rows.argmax(1)
+        if plot_progressive_rows:
+            progressive_rows = OneHotCategoricalBCHW(probs=torch.cat(progressive_rows, dim=0)).max_prob_sample()
+            logs["p(x_{t-1}|xt) at different timestep"] = progressive_rows.argmax(1)
+        
         return logs
     
     @torch.no_grad()
-    def p_sample_ddim(self, q_xT, c, ddim_timesteps, verbose=False):
+    def p_sample_ddim(self, q_xT, c, ddim_timesteps, verbose=False, **kwargs):
         logs = dict()
         
-        def q_xtm1_given_x0_xt_ddim(xt, x0, ddim_t, ddim_tm1, noise):
+        def q_xtm1_given_x0_xt_ddim(xt, x0, ddim_t, ddim_tm1, noise=None):
             # computes q_xtm1 given q_xt, q_x0, noise
             alphas_t = extract_into_tensor(self.alphas, ddim_t, x0.shape)
             alphas_cumprod_tm1 = extract_into_tensor(self.alphas_cumprod_prev, ddim_tm1, x0.shape)
             if exists(noise): theta = ((alphas_t * xt + (1 - alphas_t) * noise) * (alphas_cumprod_tm1 * x0 + (1 - alphas_cumprod_tm1) * noise))
             else: theta = ((alphas_t * xt + (1 - alphas_t) / self.num_classes) * (alphas_cumprod_tm1 * x0 + (1 - alphas_cumprod_tm1) / self.num_classes))
             return theta / theta.sum(dim=1, keepdim=True)
+        
+        def q_xtm1_given_x0pred_xt_ddim(xt, x0pred, ddim_t, ddim_tm1, noise=None):
+            alphas_t = extract_into_tensor(self.alphas, ddim_t, xt.shape)
+            alphas_cumprod_tm1 = extract_into_tensor(self.alphas_cumprod_prev, ddim_tm1, xt.shape)
+            
+            x0 = torch.eye(self.num_classes, device=xt.device)[None, :, :, None, None]
+            if self.dims == 3: x0 = x0[..., None]
+            theta_xt_xtm1 = alphas_t * xt + (1 - alphas_t) / self.num_classes
+            theta_xtm1_x0 = alphas_cumprod_tm1 * x0 + (1 - alphas_cumprod_tm1) / self.num_classes
+            aux = theta_xt_xtm1[:, :, None] * theta_xtm1_x0
+            theta_xtm1_xtx0 = aux / aux.sum(dim=1, keepdim=True)
+            return torch.einsum("bcd...,bd...->bc...", theta_xtm1_xtx0, x0pred)
         
         p_xt, b = q_xT, q_xT.shape[0]
         t_values = list(reversed(range(1, len(ddim_timesteps)))) 
@@ -271,8 +343,13 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics):
             elif self.parameterization == "x0":
                 p_x0_given_xt = model_outputs
                 
-            eps = self.get_noise(torch.zeros_like(q_xT))
-            p_xt = torch.clamp(q_xtm1_given_x0_xt_ddim(p_xt, p_x0_given_xt, t_, t_m1, eps), min=1e-12)
+            if self.parameterization == "kl":
+                p_x0_given_xt = model_outputs
+                p_xt = torch.clamp(q_xtm1_given_x0pred_xt_ddim(p_xt, p_x0_given_xt, t_, t_m1), min=1e-12)
+                p_xt = OneHotCategoricalBCHW(probs=p_xt).sample()
+            else:
+                eps = self.get_noise(torch.zeros_like(q_xT))
+                p_xt = torch.clamp(q_xtm1_given_x0_xt_ddim(p_xt, p_x0_given_xt, t_, t_m1, eps), min=1e-12)
             
         if self.p_x1_sample == "majority":
             x0pred = OneHotCategoricalBCHW(probs=p_xt).max_prob_sample()

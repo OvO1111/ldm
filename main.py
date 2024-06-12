@@ -23,7 +23,7 @@ from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.data.base import Txt2ImgIterableBaseDataset
 from ldm.util import instantiate_from_config, get_obj_from_str
-from inference.utils import TwoStreamBatchSampler, image_logger
+from inference.utils import TwoStreamBatchSampler, image_logger, combine_mask_and_im
 
 
 def default(x, defval=None):
@@ -341,6 +341,8 @@ class ImageLogger(Callback):
                 return lambda x: (x.long(), dict(params) | {"is_mask": True})
             if target == "image_rescale":
                 return lambda x: ((x - x.min()) / (x.max() - x.min()), {})
+            if target == "image_and_mask":
+                return lambda x: (combine_mask_and_im(x, n=params.get("n_mask"), overlay_coef=params.get("overlay_coef", .2)), {})
         
         self.log_nifti = log_nifti
         if self.log_nifti: 
@@ -389,10 +391,10 @@ class ImageLogger(Callback):
         path = os.path.join(root, filename)
         if self.log_separate:
             path = lambda x: os.path.join(self._maybe_mkdir(os.path.join(root, x)), filename)
-            local_images = image_logger(images, path, n_grid_images=16, log_separate=True)
+            local_images = image_logger(images, path, n_grid_images=16, log_separate=True, **self.logger)
             for k in local_images.keys(): self._enqueue_and_dequeue(path(k), split)
         else:
-            local_images = image_logger(images, path, n_grid_images=16, log_separate=False)
+            local_images = image_logger(images, path, n_grid_images=16, log_separate=False, **self.logger)
             self._enqueue_and_dequeue(path, split)
         
         if self.log_nifti:

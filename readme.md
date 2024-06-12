@@ -1,5 +1,7 @@
 3D version of "High-Resolution Image Synthesis with Latent Diffusion Models" or "Stable Diffusion"
 
+Migration of repository `OvO1111/ccdm` in progress, you can switch underlying probabilistic modeling by changing `LatentDiffusion` to `CategoricalDiffusion`
+
 # Train command
 `torchrun --nproc_per_node $N_GPU main.py --base $CFG_FILE -t --name $EXP_NAME --gpus 0,1...`
 

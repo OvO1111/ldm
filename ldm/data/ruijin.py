@@ -8,7 +8,7 @@ from tqdm import tqdm
 from einops import rearrange
 from torch.utils.data import Dataset, _utils
 
-from ldm.data.utils import conserve_only_certain_labels, identity, window_norm, load_or_write_split, TorchioForegroundCropper
+from ldm.data.utils import conserve_only_certain_labels, identity, window_norm, load_or_write_split, TorchioForegroundCropper, LabelParser
 
 
 class Ruijin_3D(Dataset):
@@ -57,6 +57,7 @@ class Ruijin_3D(Dataset):
                                                                              train=self.train_keys, 
                                                                              val=self.val_keys, test=self.test_keys)
         self.split_keys = getattr(self, f"{split}_keys")[slice(0, max_size)]
+        self.parser = LabelParser(totalseg_version="v1")
 
     def __len__(self):
         return len(self.split_keys)
@@ -90,7 +91,7 @@ class Ruijin_3D(Dataset):
         subject = self.transforms["crop"](subject)
         # normalize
         subject = self.transforms["normalize_image"](subject)
-        subject = self.transforms["normalize_mask"](subject)
+        # subject = self.transforms["normalize_mask"](subject)
         # resize
         subject = self.transforms["resize"](subject)
         # random aug

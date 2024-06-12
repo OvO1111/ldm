@@ -40,9 +40,8 @@ def exists(x):
 
 class CategoricalDiffusion(pl.LightningModule):
     def __init__(self, unet_config, loss_config, *,
-                 conditional_encoder_config=None,
+                 cond_stage_config=None,
                  train_ddim_sigmas=False,
-                 is_conditional=True,
                  data_key="mask",
                  cond_key="context",
                  timesteps=1000,
@@ -51,6 +50,7 @@ class CategoricalDiffusion(pl.LightningModule):
                  monitor=None,
                  ckpt_path=None,
                  ignore_keys=[],
+                 use_legacy=False,
                  noise_type="categorical",
                  load_only_unet=False,
                  conditioning_key="crossattn",
@@ -75,7 +75,6 @@ class CategoricalDiffusion(pl.LightningModule):
         self.loss_type = loss_type
         self.timesteps = timesteps
         self.conditioning_key = conditioning_key
-        self.is_conditional = is_conditional
         self.use_scheduler = use_scheduler
         self.loss_config = loss_config
         self.noise_type = noise_type
@@ -102,20 +101,19 @@ class CategoricalDiffusion(pl.LightningModule):
         self.register_schedule(given_betas=given_betas, beta_schedule=beta_schedule, timesteps=timesteps,
                                linear_start=linear_start, linear_end=linear_end, cosine_s=cosine_s)
         
-        unet_config["in_channels"] = self.num_classes
-        unet_config["out_channels"] = self.num_classes
+        unet_config["params"]["in_channels"] = self.num_classes
+        unet_config["params"]["out_channels"] = self.num_classes
         self.model = DiffusionWrapper(unet_config, conditioning_key)
         if ckpt_path is not None:
-            self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys, only_model=load_only_unet)
+            self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys, only_model=load_only_unet, use_legacy=use_legacy)
         self.dims = getattr(self.model, "dims", 3)
         
         if self.use_ema:
             self.model_ema = LitEma(self.model)
             print(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
             
-        if self.is_conditional:
-            if conditional_encoder_config is None: self.cond_stage_model = nn.Identity()
-            else: self.cond_stage_model = instantiate_from_config(**conditional_encoder_config)
+        if cond_stage_config is None: self.cond_stage_model = nn.Identity()
+        else: self.cond_stage_model = instantiate_from_config(cond_stage_config)
         
     @contextmanager
     def ema_scope(self, context=None):
@@ -131,11 +129,30 @@ class CategoricalDiffusion(pl.LightningModule):
                 self.model_ema.restore(self.model.parameters())
                 if context is not None:
                     print(f"{context}: Restored training weights")
+                    
+    def convert_legacy(self, state_dict):
+        state_dict = state_dict["model"]
+        
+        self.timesteps = len(state_dict["betas"])
+        self.betas = state_dict["betas"]
+        self.alphas = 1 - state_dict["betas"]
+        self.alphas_cumprod = state_dict["alphas_cumprod"]
+        self.alphas_cumprod_prev = state_dict["alphas_cumprod_prev"]
+        
+        convert_dict = dict()
+        legacy_keys = list(state_dict.keys())
+        self_keys = list(self.model.state_dict().keys())
+        
+        for k in legacy_keys:
+            if k.startswith("unet"):
+                convert_dict[k.replace("unet", "model.diffusion_model")] = state_dict[k]
+        return convert_dict
     
-    def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
+    def init_from_ckpt(self, path, ignore_keys=list(), only_model=False, use_legacy=False):
         cd = torch.load(path, map_location="cpu")
         if "state_dict" in list(cd.keys()):
             cd = cd["state_dict"]
+        if use_legacy: cd = self.convert_legacy(cd)
         keys = list(cd.keys())
         for k in keys:
             for ik in ignore_keys:
@@ -175,8 +192,10 @@ class CategoricalDiffusion(pl.LightningModule):
         self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
      
     def get_input(self, batch, data_key, cond_key):
+        if self.global_step == 71: 
+            d = 1
         x = batch.get(data_key)
-        x = rearrange(f.one_hot((x * (self.num_classes - 1)).long(), self.num_classes), "b 1 h w d x -> b x h w d")
+        x = rearrange(f.one_hot(x.long(), self.num_classes), "b 1 h w d x -> b x h w d")
         c = self.cond_stage_model(batch.get(cond_key))
         c = {f"c_{self.conditioning_key}": [c.float()]}
         ret = [x.float(), c]
@@ -186,7 +205,7 @@ class CategoricalDiffusion(pl.LightningModule):
         if self.noise_type == "uniform":
             return torch.full_like(x, fill_value=1 / self.num_classes)
         elif self.noise_type == "categorical":
-            return OneHotCategoricalBCHW(logits=torch.zeros_like(x)).sample()
+            return OneHotCategoricalBCHW(probs=torch.ones_like(x)).sample()
     
     def lpips_loss(self, x0pred, x0):
         x, y = map(lambda i: repeat(i.argmax(1, keepdim=True), 'b 1 d h w -> b c d h w', c=3), [x0pred, x0])
@@ -253,7 +272,8 @@ class CategoricalDiffusion(pl.LightningModule):
         return loss
     
     def forward(self, x, c, *args, **kwargs):
-        t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+        # t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+        t = torch.multinomial(torch.arange(self.timesteps, device=self.device) ** 1.5, x.shape[0])
         if self.model.conditioning_key is not None:
             assert c is not None
             if self.cond_stage_trainable:
@@ -308,7 +328,8 @@ class CategoricalDiffusion(pl.LightningModule):
             ce_loss = f.cross_entropy(label_cond, class_id)
             loss_log[f"{log_prefix}/ce"] = ce_loss
             batch_loss += ce_loss
-            
+        
+        loss_log[f"{log_prefix}/loss"] = batch_loss.item()
         loss_log["debug"] = model_outputs.argmax(1).max()
 
         if not self.automatic_optimization and self.training:
@@ -362,8 +383,7 @@ class CategoricalDiffusion(pl.LightningModule):
         return logs
     
     @torch.no_grad()
-    def _log_images(self, batch, split="train", sample=True, use_ddim=False, ddim_steps=50, ddim_eta=1., 
-                   plot_denoise_rows=False, plot_progressive_rows=False, plot_diffusion_rows=False, verbose=False, **kwargs):
+    def _log_images(self, batch, split="train", sample=True, use_ddim=False, ddim_steps=50, ddim_eta=1., verbose=False, **kwargs):
         x0, c = self.get_input(batch, self.data_key, self.cond_key)
         noise = self.get_noise(x0)
         
@@ -389,11 +409,11 @@ class CategoricalDiffusion(pl.LightningModule):
                 self.log(f"{split}/lpips_metric", lpips, prog_bar=True, on_step=True)
                 
             else:
-                if not use_ddim: logs = logs | self.p_sample(noise, c, verbose=verbose)
+                if not use_ddim: logs = logs | self.p_sample(noise, c, verbose=verbose, **kwargs)
                 else: logs = logs | self.p_sample_ddim(noise, c, make_ddim_timesteps("uniform", 
                                                                                      num_ddim_timesteps=ddim_steps, 
                                                                                      num_ddpm_timesteps=self.timesteps,
-                                                                                     verbose=verbose), verbose=verbose)
+                                                                                     verbose=verbose), verbose=verbose, **kwargs)
                 x0pred = logs["samples"]
 
                 lpips = self.lpips_loss(x0pred.unsqueeze(1), x0.argmax(1, keepdim=True))
@@ -419,13 +439,14 @@ class CategoricalDiffusion(pl.LightningModule):
                     p_x0_given_xt = (p_xt - (1 - alphas_t) * model_outputs) / alphas_t
                 elif self.parameterization == "x0":
                     p_x0_given_xt = model_outputs
-                eps = self.get_noise(torch.zeros_like(q_xT))
-                p_xt = torch.clamp(self.q_xtm1_given_x0_xt(p_xt, p_x0_given_xt, t_, eps), min=1e-12)
                 
                 if self.parameterization == "kl":
                     p_x0_given_xt = model_outputs
                     p_xt = torch.clamp(self.q_xtm1_given_x0pred_xt(p_xt, p_x0_given_xt, t_), min=1e-12)
                     p_xt = OneHotCategoricalBCHW(probs=p_xt).sample()
+                else:
+                    eps = self.get_noise(torch.zeros_like(q_xT))
+                    p_xt = torch.clamp(self.q_xtm1_given_x0_xt(p_xt, p_x0_given_xt, t_, eps), min=1e-12)
                 
         if self.p_x1_sample == "majority":
             x0pred = OneHotCategoricalBCHW(probs=p_xt).max_prob_sample()
@@ -439,13 +460,25 @@ class CategoricalDiffusion(pl.LightningModule):
     def p_sample_ddim(self, q_xT, c, ddim_timesteps, verbose=False):
         logs = dict()
         
-        def q_xtm1_given_x0_xt_ddim(xt, x0, ddim_t, ddim_tm1, noise):
+        def q_xtm1_given_x0_xt_ddim(xt, x0, ddim_t, ddim_tm1, noise=None):
             # computes q_xtm1 given q_xt, q_x0, noise
             alphas_t = extract_into_tensor(self.alphas, ddim_t, x0.shape)
             alphas_cumprod_tm1 = extract_into_tensor(self.alphas_cumprod_prev, ddim_tm1, x0.shape)
             if exists(noise): theta = ((alphas_t * xt + (1 - alphas_t) * noise) * (alphas_cumprod_tm1 * x0 + (1 - alphas_cumprod_tm1) * noise))
             else: theta = ((alphas_t * xt + (1 - alphas_t) / self.num_classes) * (alphas_cumprod_tm1 * x0 + (1 - alphas_cumprod_tm1) / self.num_classes))
             return theta / theta.sum(dim=1, keepdim=True)
+        
+        def q_xtm1_given_x0pred_xt_ddim(xt, x0pred, ddim_t, ddim_tm1, noise=None):
+            alphas_t = extract_into_tensor(self.alphas, ddim_t, xt.shape)
+            alphas_cumprod_tm1 = extract_into_tensor(self.alphas_cumprod_prev, ddim_tm1, xt.shape)
+            
+            x0 = torch.eye(self.num_classes, device=xt.device)[None, :, :, None, None]
+            if self.dims == 3: x0 = x0[..., None]
+            theta_xt_xtm1 = alphas_t * xt + (1 - alphas_t) / self.num_classes
+            theta_xtm1_x0 = alphas_cumprod_tm1 * x0 + (1 - alphas_cumprod_tm1) / self.num_classes
+            aux = theta_xt_xtm1[:, :, None] * theta_xtm1_x0
+            theta_xtm1_xtx0 = aux / aux.sum(dim=1, keepdim=True)
+            return torch.einsum("bcd...,bd...->bc...", theta_xtm1_xtx0, x0pred)
         
         p_xt, b = q_xT, q_xT.shape[0]
         t_values = list(reversed(range(1, len(ddim_timesteps)))) 
@@ -464,8 +497,13 @@ class CategoricalDiffusion(pl.LightningModule):
             elif self.parameterization == "x0":
                 p_x0_given_xt = model_outputs
                 
-            eps = self.get_noise(torch.zeros_like(q_xT))
-            p_xt = torch.clamp(q_xtm1_given_x0_xt_ddim(p_xt, p_x0_given_xt, t_, t_m1, eps), min=1e-12)
+            if self.parameterization == "kl":
+                p_x0_given_xt = model_outputs
+                p_xt = torch.clamp(q_xtm1_given_x0pred_xt_ddim(p_xt, p_x0_given_xt, t_, t_m1), min=1e-12)
+                p_xt = OneHotCategoricalBCHW(probs=p_xt).sample()
+            else:
+                eps = self.get_noise(torch.zeros_like(q_xT))
+                p_xt = torch.clamp(q_xtm1_given_x0_xt_ddim(p_xt, p_x0_given_xt, t_, t_m1, eps), min=1e-12)
             
         if self.p_x1_sample == "majority":
             x0pred = OneHotCategoricalBCHW(probs=p_xt).max_prob_sample()

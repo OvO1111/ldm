@@ -119,7 +119,7 @@ def combine_mask_and_im(x, overlay_coef=0.2, colors=None, n=11, mask_normalied=T
     return colored_im
 
 
-def visualize(image: torch.Tensor, n_mask: int=11, num_images=8, is_mask=False):
+def visualize(image: torch.Tensor, n_mask: int=20, num_images=8, is_mask=False):
     is_mask = is_mask or image.dtype == torch.long
     if len(image.shape) == 5:
         image = image[:, 0] 
@@ -163,7 +163,7 @@ def image_logger(dict_of_images, path, log_separate=False, **kwargs):
                 ax.imshow(np.zeros((5, 10)))
                 ax.text(0, 0, "\n".join([v[i * linewidth: (i + 1) * linewidth] for i in range(np.ceil(len(v) / linewidth).astype(int))]),
                         color="white",
-                        fontproperties=matplotlib.font_manager.FontProperties(size=5,
+                        fontproperties=matplotlib.font_manager.FontProperties(size=7,
                                                                                 fname='/ailab/user/dailinrui/data/dependency/Arial-Unicode-Bold.ttf'))
         
         plt.savefig(path, dpi=300, bbox_inches="tight", pad_inches=0)

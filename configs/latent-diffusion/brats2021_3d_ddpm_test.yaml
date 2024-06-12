@@ -1,6 +1,6 @@
 model:
   base_learning_rate: 2.0e-05
-  target: ldm.models.diffusion.ddpm.LatentDiffusion
+  target: inference.models.InferLatentDiffusion
   params:
     linear_start: 0.0015
     linear_end: 0.0195
@@ -14,6 +14,7 @@ model:
     channels: 4  # after first-stage encoding
     monitor: val/loss_simple_ema
     cond_stage_trainable: false
+    ckpt_path: /ailab/user/dailinrui/data/ldm/brats21_ddpm_128_128_128/checkpoints/epoch=000750.ckpt
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
@@ -34,31 +35,32 @@ model:
     cond_stage_config: __is_first_stage__
 
 data:
-  target: main.DataModuleFromConfig
+  target: test.DataModuleFromConfig
   params:
     batch_size: 1
     num_workers: 2
     wrap: False
-    train:
+    test:
       target: ldm.data.brats2021.BraTS2021_3D
       params:
-        split: train
-        crop_to: [128, 128, 128]
-    validation:
-      target: ldm.data.brats2021.BraTS2021_3D
-      params:
-        split: val
+        split: test
         crop_to: [128, 128, 128]
 
 lightning:
   callbacks:
     image_logger:
-      target: main.ImageLogger
+      target: test.ImageLogger
       params:
-        train_batch_frequency: 400
-        max_images: 20
+        test_batch_frequency: 1
+        max_images: -1
         log_separate: false
-        clamp: false
+        log_images_kwargs:
+          verbose: true
+          log_metrics: true
+          log_original: true
+          log_original_keys: [conditioning, samples]
+          ddim_steps: null
+          log_group_metrics_in_2d: true
         logger:
           inputs: 
             target: image_rescale

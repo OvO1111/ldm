@@ -1202,7 +1202,7 @@ class CCDMUNetModel(nn.Module):
             self.out_ce = None
         
         last_layer_chn = self.model_channels * self.channel_mult[-1]
-        spatial_chn = round(np.prod(self.spatial_size)/(2**(self.dims*(len(self.channel_mult)-1))))
+        spatial_chn = round(np.prod(np.ceil(np.array(self.spatial_size)/(2**((len(self.channel_mult)-1))))))
         self.fc_in = last_layer_chn * spatial_chn
         self.bn = nn.BatchNorm3d(last_layer_chn)
         self.fc = nn.Sequential(nn.Linear(in_features=self.fc_in, out_features=64),
