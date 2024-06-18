@@ -132,7 +132,7 @@ def visualize(image: torch.Tensor, n_mask: int=20, num_images=8, is_mask=False):
     if is_mask:
         cmap = get_cmap("viridis")
         rgb = torch.tensor([(0, 0, 0)] + [cmap(i)[:-1] for i in np.arange(0.3, n_mask) / n_mask], device=image.device)
-        colored_mask = rearrange(rgb[image][0], "i j n -> 1 n i j")
+        colored_mask = rearrange(rgb[image.long()][0], "i j n -> 1 n i j")
         return colored_mask
     else:
         return image
@@ -159,7 +159,7 @@ def image_logger(dict_of_images, path, log_separate=False, **kwargs):
             if isinstance(v, np.ndarray):
                 ax.imshow(rearrange(v, "c h w -> h w c"))
             if isinstance(v, str):
-                linewidth = 50
+                linewidth = 30
                 ax.imshow(np.zeros((5, 10)))
                 ax.text(0, 0, "\n".join([v[i * linewidth: (i + 1) * linewidth] for i in range(np.ceil(len(v) / linewidth).astype(int))]),
                         color="white",

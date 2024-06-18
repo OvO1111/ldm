@@ -302,16 +302,21 @@ class SetupCallback(Callback):
 
         else:
             # ModelCheckpoint callback created log directory --- remove it
-            # if not self.resume and os.path.exists(self.logdir):
-            #     dst, name = os.path.split(self.logdir)
-            #     dst = os.path.join(dst, "child_runs", name)
-            #     os.makedirs(os.path.split(dst)[0], exist_ok=True)
-            #     try:
-            #         shutil.copytree(self.logdir, dst)
-            #     except FileNotFoundError:
-            #         pass
-            #     except FileExistsError:
-            #         pass
+            if not self.resume and os.path.exists(self.logdir):
+                dst, name = os.path.split(self.logdir)
+                dst = os.path.join(dst, "child_runs", name)
+                os.makedirs(os.path.split(dst)[0], exist_ok=True)
+                try:
+                    shutil.copytree(self.logdir, dst)
+                    shutil.rmtree(self.logdir)
+                    ckptdir = os.path.join(self.logdir, "checkpoints")
+                    cfgdir = os.path.join(self.logdir, "configs")
+                    os.makedirs(ckptdir, exist_ok=True)
+                    os.makedirs(cfgdir, exist_ok=True)
+                except FileNotFoundError:
+                    pass
+                except FileExistsError:
+                    pass
             pass
 
 

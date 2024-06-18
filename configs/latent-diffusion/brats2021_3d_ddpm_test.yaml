@@ -1,6 +1,6 @@
 model:
   base_learning_rate: 2.0e-05
-  target: inference.models.InferLatentDiffusion
+  target: inference.models.InferMixedDiffusion
   params:
     linear_start: 0.0015
     linear_end: 0.0195
@@ -14,7 +14,8 @@ model:
     channels: 4  # after first-stage encoding
     monitor: val/loss_simple_ema
     cond_stage_trainable: false
-    ckpt_path: /ailab/user/dailinrui/data/ldm/brats21_ddpm_128_128_128/checkpoints/epoch=000750.ckpt
+    mix_scheme: direct
+    ckpt_path: /ailab/user/dailinrui/data/ldm/brats21_ddpm_128_128_128/checkpoints/epoch=000955.ckpt
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
@@ -37,14 +38,21 @@ model:
 data:
   target: test.DataModuleFromConfig
   params:
-    batch_size: 1
+    batch_size: 2
     num_workers: 2
     wrap: False
+    batch_sampler: 
+      target: 
+        inference.utils.TwoStreamBatchSampler
+      params:
+        primary_batch_size: 1
     test:
       target: ldm.data.brats2021.BraTS2021_3D
       params:
-        split: test
+        split: train
+        n_fine: 10
         crop_to: [128, 128, 128]
+        base: /ailab/user/dailinrui/data/datasets/BraTS2021
 
 lightning:
   callbacks:
@@ -54,11 +62,11 @@ lightning:
         test_batch_frequency: 1
         max_images: -1
         log_separate: false
+        log_original: true
+        log_original_keys: [mixed_samples, mixed_fine, mixed_coarse]
         log_images_kwargs:
           verbose: true
           log_metrics: true
-          log_original: true
-          log_original_keys: [conditioning, samples]
           ddim_steps: null
           log_group_metrics_in_2d: true
         logger:
@@ -75,4 +83,5 @@ lightning:
 
   trainer:
     benchmark: True
+    replace_sampler_ddp: false
     max_epochs: 1000

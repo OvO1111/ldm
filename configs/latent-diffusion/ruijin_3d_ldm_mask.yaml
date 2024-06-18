@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 2.0e-06
+  base_learning_rate: 2.0e-05
   target: ldm.models.diffusion.ddpm.LatentDiffusion
   params:
     linear_start: 0.0015
@@ -8,13 +8,12 @@ model:
     log_every_t: 200
     timesteps: 1000
     first_stage_key: mask
-    cond_stage_key: text
+    cond_stage_key: context
     conditioning_key: crossattn
     image_size: 
       - 64
       - 128
       - 128
-    channels: 1
     monitor: val/loss_simple_ema
 
     unet_config:
@@ -22,8 +21,8 @@ model:
       params:
         dims: 3
         image_size: 64  # not used
-        in_channels: 1
-        out_channels: 1
+        in_channels: 4
+        out_channels: 4
         model_channels: 64
         attention_resolutions: [32, 16, 8]
         num_res_blocks: 2
@@ -32,12 +31,32 @@ model:
         use_checkpoint: True  # always use ckpt
 
     first_stage_config: 
-      target: ldm.modules.encoders.modules.DummyFirstStage
+      target: ldm.models.autoencoder.AutoencoderKL
+      params:
+        monitor: "val/rec_loss"
+        image_key: mask
+        embed_dim: 4
+        dims: 3
+        ckpt_path: /ailab/user/dailinrui/data/ldm/ruijin_mask_vae_kl_64_128_128/checkpoints/epoch=000039.ckpt
+        lossconfig:
+          target: torch.nn.Identity
+
+        ddconfig:
+          double_z: True
+          z_channels: 1
+          resolution: [96, 192, 192]
+          in_channels: 1
+          out_ch: 1
+          ch: 96
+          ch_mult: [1,2,4,4,8]  # num_down = len(ch_mult)-1
+          num_res_blocks: 2
+          dropout: 0.0
+          attn_resolutions: [8,]  # on z axis, starting with 8->16->32 for len(ch_mult)==4 and resolution==64
+          attn_type: vanilla
+          use_checkpoint: True  # always use ckpt
 
     cond_stage_config: 
-      target: ldm.modules.encoders.modules.FrozenBERTEmbedder
-      # params:
-      #   ckpt_path: /mnt/data/oss_beijing/dailinrui/data/pretrained_weights/bert-ernie-health
+      target: torch.nn.Identity
 
 data:
   target: main.DataModuleFromConfig
@@ -56,25 +75,26 @@ data:
         split: val
         resize_to: [64, 128, 128]
 
-
 lightning:
   callbacks:
     image_logger:
       target: main.ImageLogger
       params:
-        train_batch_frequency: 2000
-        max_images: 4
+        train_batch_frequency: 500
+        max_images: 5
         logger:
           inputs: 
-            target: image_rescale
-          conditioning:
             target: mask_rescale
-            params: 
+            params:
               n_mask: 11
           reconstruction:
-            target: image_rescale
+            target: mask_rescale
+            params:
+              n_mask: 11
           samples:
-            target: image_rescale
+            target: mask_rescale
+            params:
+              n_mask: 11
 
   trainer:
     benchmark: True

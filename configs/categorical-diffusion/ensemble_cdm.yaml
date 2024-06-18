@@ -8,8 +8,9 @@ model:
     timesteps: 1000
     num_classes: 15  # include background class
     data_key: mask
-    cond_key: prompt
+    cond_key: text
     parameterization: kl
+    noise_type: categorical
     conditioning_key: crossattn
     monitor: val/loss
     cond_stage_trainable: false
@@ -77,6 +78,8 @@ lightning:
         train_batch_frequency: 200
         val_batch_frequency: 1
         max_images: 10
+        log_images_kwargs:
+          plot_denoising_rows: true
         logger:
           inputs: 
             target: mask_rescale
@@ -87,7 +90,11 @@ lightning:
             params: 
               n_mask: 15
           samples:
-            target: image_rescale
+            target: mask_rescale
+            params: 
+              n_mask: 15
+          ddim_samples:
+            target: mask_rescale
             params: 
               n_mask: 15
 

@@ -74,6 +74,9 @@ class LabelParser:
             if isinstance(totalseg_indices, int): totalseg_indices = [totalseg_indices]
             for totalseg_index in totalseg_indices:
                 label_[label == totalseg_index] = label_index
+        # import SimpleITK as sitk
+        # sitk.WriteImage(sitk.GetImageFromArray(label[0].numpy().astype(np.uint8)), "/ailab/user/dailinrui/data/test_before_process.nii.gz")
+        # sitk.WriteImage(sitk.GetImageFromArray(label_[0].numpy().astype(np.uint8)), "/ailab/user/dailinrui/data/test_after_process.nii.gz")
         return label_
 
 
@@ -179,6 +182,30 @@ def load_or_write_split(basefolder, force=False, **splits):
             json.dump(splits, f, indent=4)
     splits = list(splits.get(_) for _ in ["train", "val", "test"])
     return splits
+
+
+class TorchioBaseResizer(tio.transforms.Transform):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    @staticmethod
+    def _interpolate(x, scale_coef, mode="trilinear"):
+        x_rsz = torch.nn.functional.interpolate(x[None].float(), scale_factor=scale_coef, mode=mode)[0]
+        if mode == "nearest":
+            x_rsz = x_rsz.round()
+        return x_rsz
+        
+    def apply_transform(self, data: tio.Subject):
+        # data: c h w d
+        subject_ = {k: v.data for k, v in data.items()}
+        type_ = {k: v.type for k, v in data.items()}
+        class_ = {k: tio.ScalarImage if isinstance(v, tio.ScalarImage) else tio.LabelMap for k, v in data.items()}
+        
+        local_spacing = np.array(data[list(subject_.keys())[0]]["spacing"])
+        scale_coef = tuple(local_spacing / local_spacing.mean())[::-1]
+        
+        subject_ = {k: class_[k](tensor=self._interpolate(v, scale_coef, mode="nearest" if type_[k] == "label" else "trilinear"), type=type_[k]) for k, v in subject_.items()}
+        return tio.Subject(subject_)
 
 
 class TorchioForegroundCropper(tio.transforms.Transform):

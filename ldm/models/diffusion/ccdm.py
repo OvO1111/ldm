@@ -205,7 +205,7 @@ class CategoricalDiffusion(pl.LightningModule):
         if self.noise_type == "uniform":
             return torch.full_like(x, fill_value=1 / self.num_classes)
         elif self.noise_type == "categorical":
-            return OneHotCategoricalBCHW(probs=torch.ones_like(x)).sample()
+            return OneHotCategoricalBCHW(logits=torch.zeros_like(x)).sample()
     
     def lpips_loss(self, x0pred, x0):
         x, y = map(lambda i: repeat(i.argmax(1, keepdim=True), 'b 1 d h w -> b c d h w', c=3), [x0pred, x0])
@@ -242,29 +242,19 @@ class CategoricalDiffusion(pl.LightningModule):
         return theta / theta.sum(dim=1, keepdim=True)
 
     def q_xtm1_given_x0pred_xt(self, xt, theta_x0, t):
-        """
-        This is equivalent to calling theta_post with all possible values of x0
-        from 0 to C-1 and multiplying each answer times theta_x0[:, c].
-
-        This should be used when x0 is unknown and what you have is a probability
-        distribution over x0. If x0 is one-hot encoded (i.e., only 0's and 1's),
-        use theta_post instead.
-        """
+        # computes q_xtm1 given q_xt, q_x0, noise by evaluating every possible x0=l\in[1...L] and p(x0=l|xt)
         alphas_t = extract_into_tensor(self.alphas, t, xt.shape)
         alphas_cumprod_tm1 = extract_into_tensor(self.alphas_cumprod_prev, t, xt.shape)[..., None]
 
         # We need to evaluate theta_post for all values of x0
         x0 = torch.eye(self.num_classes, device=xt.device)[None, :, :, None, None]
         if self.dims == 3: x0 = x0[..., None]
-        # theta_xt_xtm1.shape == [B, C, H, W]
-        theta_xt_xtm1 = alphas_t * xt + (1 - alphas_t) / self.num_classes
-        # theta_xtm1_x0.shape == [B, C1, C2, H, W]
-        theta_xtm1_x0 = alphas_cumprod_tm1 * x0 + (1 - alphas_cumprod_tm1) / self.num_classes
+        theta_xt_xtm1 = alphas_t * xt + (1 - alphas_t) / self.num_classes # [B, C, H, W]
+        theta_xtm1_x0 = alphas_cumprod_tm1 * x0 + (1 - alphas_cumprod_tm1) / self.num_classes # [B, C1, C2, H, W]
 
         aux = theta_xt_xtm1[:, :, None] * theta_xtm1_x0
-        # theta_xtm1_xtx0 == [B, C1, C2, H, W]
-        theta_xtm1_xtx0 = aux / aux.sum(dim=1, keepdim=True)
-        return torch.einsum("bcd...,bd...->bc...", theta_xtm1_xtx0, theta_x0)
+        theta_xtm1_xtx0 = aux / aux.sum(dim=1, keepdim=True) # [B, C1, C2, H, W]
+        return torch.einsum("bcd..., bd... -> bc...", theta_xtm1_xtx0, theta_x0)
     
     def shared_step(self, batch, **kwargs):
         x, c = self.get_input(batch, self.data_key, self.cond_key)
@@ -293,7 +283,7 @@ class CategoricalDiffusion(pl.LightningModule):
     
     def p_losses(self, x0, c, t, class_id=None, *args, **kwargs):
         noise = self.get_noise(x0)
-        q_xt = self.q_xt_given_x0(x0, t, noise)
+        q_xt = self.q_xt_given_x0(x0, t, noise if self.parameterization != "kl" else None)
         model_outputs = self.model(q_xt, t, **c)
         if isinstance(model_outputs, dict): 
             label_cond = model_outputs.get("label_out")
@@ -374,12 +364,13 @@ class CategoricalDiffusion(pl.LightningModule):
     def log_images(self, *args, **kwargs):
         logs = dict()
         logs1 = self._log_images(use_ddim=False, *args, **kwargs)
-        logs2 = self._log_images(use_ddim=True, *args, **kwargs)
         for k, v in logs1.items():
             if k not in ["samples"]:
                 logs[k] = v
         logs["samples"] = logs1["samples"]
-        logs["ddim_samples"] = logs2["samples"]
+        if not self.training and self.parameterization != "kl":
+            logs2 = self._log_images(use_ddim=True, *args, **kwargs)
+            logs["ddim_samples"] = logs2["samples"]
         return logs
     
     @torch.no_grad()
@@ -392,10 +383,9 @@ class CategoricalDiffusion(pl.LightningModule):
         logs["inputs"] = x0.argmax(1)
         logs["conditioning"] = str(batch["text"])
         if sample:
-            prefix = "no_ddim" if not use_ddim else "ddim"
             if split == "train":
                 t = torch.randint(0, self.num_timesteps, (b,), device=self.device).long()
-                q_xt = self.q_xt_given_x0(x0, t, noise)
+                q_xt = self.q_xt_given_x0(x0, t, noise if self.parameterization != "kl" else None)
                 model_outputs = self.model(q_xt, t, **c)
                 if isinstance(model_outputs, dict): 
                     model_outputs = model_outputs["diffusion_out"]
@@ -422,12 +412,17 @@ class CategoricalDiffusion(pl.LightningModule):
         return logs
     
     @torch.no_grad()
-    def p_sample(self, q_xT=None, c=None, verbose=False, plot_denoise_rows=False, plot_progressive_rows=False, plot_diffusion_rows=False):
+    def p_sample(self, q_xT=None, c=None, verbose=False, 
+                 plot_progressive_rows=False, 
+                 plot_denoising_rows=False, plot_diffusion_every_t=200):
         logs = dict()
         with self.ema_scope():
             c = c if exists(c) else dict()
             p_xt, b = q_xT, q_xT.shape[0]
-            t_values = reversed(range(1, self.timesteps)) if not verbose else tqdm(reversed(range(1, self.timesteps)), total=self.timesteps, desc="sampling progress")
+            t_values = reversed(range(1, self.timesteps)) if not verbose else tqdm(reversed(range(1, self.timesteps)), total=self.timesteps - 1, desc="sampling progress")
+            
+            if plot_denoising_rows: denoising_rows = []
+            if plot_progressive_rows: progressive_rows = []
             for t in t_values:
                 t_ = torch.full(size=(b,), fill_value=t, device=q_xT.device)
                 model_outputs = self.model(p_xt, t_, **c)
@@ -448,12 +443,22 @@ class CategoricalDiffusion(pl.LightningModule):
                     eps = self.get_noise(torch.zeros_like(q_xT))
                     p_xt = torch.clamp(self.q_xtm1_given_x0_xt(p_xt, p_x0_given_xt, t_, eps), min=1e-12)
                 
+                if plot_denoising_rows and t % plot_diffusion_every_t == 0: denoising_rows.append(p_x0_given_xt)
+                if plot_progressive_rows and t % plot_diffusion_every_t == 0: progressive_rows.append(p_xt)
+
         if self.p_x1_sample == "majority":
             x0pred = OneHotCategoricalBCHW(probs=p_xt).max_prob_sample()
         elif self.p_x1_sample == "confidence":
             x0pred = OneHotCategoricalBCHW(probs=p_xt).prob_sample()
             
         logs["samples"] = x0pred.argmax(1)
+        if plot_denoising_rows:
+            denoising_rows = OneHotCategoricalBCHW(probs=torch.cat(denoising_rows, dim=0)).max_prob_sample()
+            logs["p(x0|xt) at different timestep"] = denoising_rows.argmax(1)
+        if plot_progressive_rows:
+            progressive_rows = OneHotCategoricalBCHW(probs=torch.cat(progressive_rows, dim=0)).max_prob_sample()
+            logs["p(x_{t-1}|xt) at different timestep"] = progressive_rows.argmax(1)
+        
         return logs
             
     @torch.no_grad()

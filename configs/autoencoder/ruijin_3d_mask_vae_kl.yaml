@@ -46,7 +46,6 @@ data:
         split: val
         resize_to: [64, 128, 128]
 
-
 lightning:
   callbacks:
     image_logger:

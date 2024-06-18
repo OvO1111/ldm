@@ -5,7 +5,7 @@ import os
 import random
 import SimpleITK as sitk
 import torchio as tio
-from ldm.data.utils import TorchioForegroundCropper, identity
+from ldm.data.utils import TorchioForegroundCropper, identity, TorchioBaseResizer
 
 
 class Txt2ImgIterableBaseDataset(IterableDataset):
@@ -32,7 +32,9 @@ class Txt2ImgIterableBaseDataset(IterableDataset):
 class MSDDataset(Dataset):
     def __init__(self, base_folder, mapping={}, split="train", max_size=None, resize_to=(96,)*3, force_rewrite_split=False, info={}):
         self.load_fn = lambda x: sitk.GetArrayFromImage(sitk.ReadImage(x))
+        self.get_spacing = lambda x: sitk.ReadImage(x).GetSpacing()
         self.transforms = dict(
+            resize_base=TorchioBaseResizer(),
             resize=tio.Resize(resize_to) if resize_to is not None else tio.Lambda(identity),
             crop=TorchioForegroundCropper(crop_level="mask_foreground", 
                                           crop_anchor="totalseg",
@@ -70,14 +72,19 @@ class MSDDataset(Dataset):
         
         if self.split in ["train", "val"]:
             image, mask, totalseg = map(lambda x: self.load_fn(os.path.join(self.base_folder, x, item)), ["imagesTr", "labelsTr", "totalsegTr"])
-            subject = tio.Subject(image=tio.ScalarImage(tensor=image[None]), 
-                                  mask=tio.LabelMap(tensor=mask[None]),
-                                  totalseg=tio.LabelMap(tensor=totalseg[None]))
+            spacing = self.get_spacing(os.path.join(self.base_folder, "labelsTr", item))
+            subject = tio.Subject(image=tio.ScalarImage(tensor=image[None], spacing=spacing), 
+                                  mask=tio.LabelMap(tensor=mask[None], spacing=spacing),
+                                  totalseg=tio.LabelMap(tensor=totalseg[None], spacing=spacing))
         if self.split == "test":
             image = self.load_fn(os.path.join(self.base_folder, "imagesTs", item))
-            subject = tio.Subject(image=tio.ScalarImage(tensor=image[None]))
+            spacing = self.get_spacing(os.path.join(self.base_folder, "imagesTs", item))
+            subject = tio.Subject(image=tio.ScalarImage(tensor=image[None], spacing=spacing))
+        # resize based on spacing
+        subject = self.transforms["resize_base"](subject)
         # crop
         subject = self.transforms["crop"](subject)
+        ori_size = subject.image.data.shape
         # normalize
         subject = self.transforms["normalize_image"](subject)
         subject = self.transforms["normalize_mask"](subject)
@@ -85,6 +92,6 @@ class MSDDataset(Dataset):
         subject = self.transforms["resize"](subject)
         # random aug
         subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
-        subject = {k: v.data for k, v in subject.items()} | {"ids": idx, 'casename': self.split_keys[idx]  if isinstance(idx, int) else idx}
+        subject = {k: v.data for k, v in subject.items()} | {"ids": idx, 'casename': self.split_keys[idx] if isinstance(idx, int) else idx, "ori_size": ori_size}
 
         return subject

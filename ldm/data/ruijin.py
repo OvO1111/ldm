@@ -8,7 +8,7 @@ from tqdm import tqdm
 from einops import rearrange
 from torch.utils.data import Dataset, _utils
 
-from ldm.data.utils import conserve_only_certain_labels, identity, window_norm, load_or_write_split, TorchioForegroundCropper, LabelParser
+from ldm.data.utils import conserve_only_certain_labels, identity, window_norm, load_or_write_split, TorchioForegroundCropper, TorchioBaseResizer, LabelParser
 
 
 class Ruijin_3D(Dataset):
@@ -27,8 +27,10 @@ class Ruijin_3D(Dataset):
 
         self.use_summary_level = use_summary_level
         self.collate_context_len = context_len
+        self.get_spacing = lambda x: sitk.ReadImage(x).GetSpacing()
         self.load_fn = lambda x: sitk.GetArrayFromImage(sitk.ReadImage(x))
         self.transforms = dict(
+            resize_base=TorchioBaseResizer(),
             resize=tio.Resize(resize_to) if resize_to is not None else tio.Lambda(identity),
             crop=TorchioForegroundCropper(crop_level="mask_foreground", 
                                           crop_anchor="mask",
@@ -77,6 +79,7 @@ class Ruijin_3D(Dataset):
         item = self.data[self.split_keys[idx]] if isinstance(idx, int) else idx
         context = torch.tensor(self.context[self.split_keys[idx] if isinstance(idx, int) else idx])
         data, totalseg, crcseg, text = map(lambda x: item[x], ["ct", "totalseg", "crcseg", "summary"])
+        spacing = self.get_spacing(totalseg)
         image, mask, crcmask = map(self.load_fn, [data, totalseg, crcseg])
         
         if self.use_summary_level == "short": text = item.get("summary", "").split("；")[0]
@@ -86,9 +89,12 @@ class Ruijin_3D(Dataset):
         mask = conserve_only_certain_labels(mask)
         mask[crcmask > 0] = 11
         
-        subject = tio.Subject(image=tio.ScalarImage(tensor=image[None]), mask=tio.ScalarImage(tensor=mask[None]),)
+        subject = tio.Subject(image=tio.ScalarImage(tensor=image[None], spacing=spacing), mask=tio.LabelMap(tensor=mask[None], spacing=spacing),)
+        # resize based on spacing
+        subject = self.transforms["resize_base"](subject)
         # crop
         subject = self.transforms["crop"](subject)
+        ori_size = subject.image.data.shape
         # normalize
         subject = self.transforms["normalize_image"](subject)
         # subject = self.transforms["normalize_mask"](subject)
@@ -96,7 +102,7 @@ class Ruijin_3D(Dataset):
         subject = self.transforms["resize"](subject)
         # random aug
         subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
-        subject = {k: v.data for k, v in subject.items()} | {"text": text, "context": context, "class_id": self._get_class(item.get("summary", "").split("；")[0])}
+        subject = {k: v.data for k, v in subject.items()} | {"text": text, "context": context, "class_id": self._get_class(item.get("summary", "").split("；")[0]), "ori_size": ori_size}
 
         return subject
     

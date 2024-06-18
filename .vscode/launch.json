@@ -9,23 +9,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/autoencoder/ruijin_3d_ae_kl.yaml", "-t", "--gpus", "0,", "--name", "test"],
-            "console": "integratedTerminal"
-        },
-        {
-            "name": "debug latentdiffusion",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "./main.py",
-            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ddpm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
-            "console": "integratedTerminal"
-        },
-        {
-            "name": "debug latentdiffusion-testtime",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "./test.py",
-            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm_test.yaml", "--gpus", "0,", "--name", "test", "--debug"],
+            "args": ["-b", "./configs/autoencoder/ensemble_vq.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         // {
@@ -36,14 +20,22 @@
         //     "args": ["-b", "./configs/autoencoder/ruijin_3d_ae_kl_test.yaml", "--gpus", "0,", "--name", "test", "--debug"],
         //     "console": "integratedTerminal"
         // },
-        // {
-        //     "name": "debug current file",
-        //     "type": "debugpy",
-        //     "request": "launch",
-        //     "program": "${file}",
-        //     "args": [],
-        //     "console": "integratedTerminal"
-        // },
+        {
+            "name": "debug latentdiffusion",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./main.py",
+            "args": ["-b", "./configs/latent-diffusion/ruijin_3d_ldm_mask.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "debug latentdiffusion-testtime",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./test.py",
+            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ddpm_test.yaml", "--gpus", "0,", "--name", "test", "--debug"],
+            "console": "integratedTerminal"
+        },
         {
             "name": "debug categoricaldiffusion",
             "type": "debugpy",
@@ -57,7 +49,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./test.py",
-            "args": ["-b", "./configs/categorical-diffusion/ruijin_3d_cdm_test.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
+            "args": ["-b", "./configs/categorical-diffusion/ensemble_cdm_test.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {
@@ -68,5 +60,13 @@
             "args": ["-b", "./configs/clip/clip.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
+        // {
+        //     "name": "debug current file",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "${file}",
+        //     "args": [],
+        //     "console": "integratedTerminal"
+        // },
     ]
 }

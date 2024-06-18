@@ -1,15 +1,16 @@
 model:
-  base_learning_rate: 1e-5
-  target: ldm.models.diffusion.ccdm.CategoricalDiffusion
+  base_learning_rate: 2e-5
+  target: inference.models.InferCategoricalDiffusion
   params:
+    # diffusion kwargs
     linear_start: 1e-2
     linear_end: 0.2
     log_every_t: 200
     timesteps: 1000
-    num_classes: 12  # include background class
+    num_classes: 15  # include background class
     data_key: mask
-    cond_key: context
-    parameterization: x0
+    cond_key: text
+    noise_type: categorical
     conditioning_key: crossattn
     monitor: val/loss
     cond_stage_trainable: false
@@ -21,20 +22,29 @@ model:
         end_factor: 1e-3
         total_iters: 500
     use_automatic_optimization: false
-    class_weights: [1,1,1,1,1,1,1,1,1,1,1,1]
+
+    # whether use legacy
+    use_legacy: true
+    parameterization: kl
+    ckpt_path: /ailab/user/dailinrui/data/ccdm/ruijin_ensemble_64_128_128_baseline/checkpoint/checkpoint_ep106_gs312012.ckpt
+
+    # make dataset
+    save_dataset: true 
+    save_dataset_path: /ailab/user/dailinrui/data/ccdm/ruijin_ensemble_64_128_128_baseline/dataset
+    include_keys: [image, text]
+    suffix_keys: 
+      image: .nii.gz
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.CCDMUNetModel
       params:
         image_size: [64, 128, 128]
-        in_channels: 12
-        out_channels: 12
         model_channels: 64
-        attention_resolutions: [32, 16, 8]
+        attention_resolutions: [32,16,8]
         num_res_blocks: 2
         channel_mult: [1,2,2,4,8]
         use_spatial_transformer: true
-        context_dim: 5120
+        context_dim: 768
         num_heads: 1
         num_head_channels: 32
         use_checkpoint: true  # always use ckpt
@@ -42,7 +52,9 @@ model:
         n_labels: 6
 
     cond_stage_config: 
-      target: torch.nn.Identity
+      target: ldm.modules.encoders.modules.FrozenBERTEmbedder
+      params:
+        ckpt_path: /ailab/user/dailinrui/data/dependency/bert-ernie-health
 
     loss_config:
       # ce_loss:
@@ -53,50 +65,48 @@ model:
         coeff: 1
 
 data:
-  target: main.DataModuleFromConfig
+  target: test.DataModuleFromConfig
   params:
     batch_size: 1
-    num_workers: 12
+    num_workers: 2
     wrap: false
-    train:
-      target: ldm.data.ruijin.Ruijin_3D
+    test:
+      target: ldm.data.ensemble.EnsembleDataset
       params:
         split: train
         resize_to: [64, 128, 128]
-    validation:
-      target: ldm.data.ruijin.Ruijin_3D
-      params:
-        split: val
-        resize_to: [64, 128, 128]
-        max_size: 5
 
 lightning:
   callbacks:
     image_logger:
-      target: main.ImageLogger
+      target: test.ImageLogger
       params:
-        train_batch_frequency: 200
-        val_batch_frequency: 1
+        test_batch_frequency: 1
         max_images: 10
+        log_images_kwargs:
+          plot_denoising_rows: true
+          verbose: true
+          log_metrics: true
+          ddim_steps: null
+          log_group_metrics_in_2d: true
         logger:
           inputs: 
             target: mask_rescale
             params: 
-              n_mask: 11
-          xt:
+              n_mask: 15
+          noise:
             target: mask_rescale
             params: 
-              n_mask: 11
+              n_mask: 15
           samples:
             target: mask_rescale
             params: 
-              n_mask: 11
+              n_mask: 15
           ddim_samples:
             target: mask_rescale
             params: 
-              n_mask: 11
+              n_mask: 15
 
   trainer:
     benchmark: True
     accumulate_grad_batches: 1
-    max_epochs: 1000

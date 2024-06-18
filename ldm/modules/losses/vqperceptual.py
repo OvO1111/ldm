@@ -60,7 +60,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                  disc_num_layers=3, disc_in_channels=1, disc_factor=1.0, disc_weight=1.0,
                  perceptual_weight=1.0, use_actnorm=False, disc_conditional=False,
                  disc_ndf=64, disc_loss="hinge", n_classes=None, perceptual_loss="lpips",
-                 pixel_loss="l1", image_gan_weight=0.5, ct_gan_weight=0.5, gan_feat_weight=1.0, dims=2):
+                 pixel_loss="l1", image_gan_weight=0.5, ct_gan_weight=0.5, gan_feat_weight=1.0, dims=3, nframes_select=10):
         super().__init__()
         assert disc_loss in ["hinge", "vanilla"]
         assert perceptual_loss in ["lpips", "clips", "dists"]
@@ -80,11 +80,12 @@ class VQLPIPSWithDiscriminator(nn.Module):
         else:
             self.pixel_loss = l2
 
+        self.n_frames = nframes_select
         self.frame_discriminator = NLayerDiscriminator(input_nc=disc_in_channels,
                                                  n_layers=disc_num_layers,
                                                  use_actnorm=use_actnorm,
                                                  ndf=disc_ndf,
-                                                 getIntermFeat=False
+                                                 getIntermFeat=self.dims == 3
                                                  ).apply(weights_init)
         self.ct_discriminator = NLayerDiscriminator3D(input_nc=disc_in_channels,
                                                       n_layers=disc_num_layers,
@@ -119,8 +120,19 @@ class VQLPIPSWithDiscriminator(nn.Module):
         d_weight = d_weight * self.discriminator_weight
         return d_weight
     
-    def forward(self, *args, **kwargs):
-        return self.forward_2d(*args, **kwargs) if self.dims == 2 else self.forward_3d(*args, **kwargs) if self.dims == 3 else None
+    def forward(self, q_loss, inputs, reconstructions, *args, **kwargs):
+        b, c, *shp = inputs.shape
+        assert inputs.shape == reconstructions.shape, f"{inputs.shape} and {reconstructions.shape} not match"
+        if c > 1:
+            inputs = rearrange(inputs, "b c ... -> (b c) 1 ...")
+            reconstructions = rearrange(reconstructions, "b c ... -> (b c) 1 ...")
+        if len(shp) == 3:
+            out = self.forward_3d(q_loss, inputs, reconstructions, *args, **kwargs)
+        elif len(shp) == 2:
+            out = self.forward_2d(q_loss, inputs, reconstructions, *args, **kwargs)
+        # if c > 1:
+        #     out = rearrange(out, "(b c) 1 ... -> b c ...", c=c)
+        return out
     
     def forward_2d(self, codebook_loss, inputs, reconstructions, optimizer_idx, global_step, 
                 last_layer=None, cond=None, split="train", predicted_indices=None):
@@ -201,8 +213,11 @@ class VQLPIPSWithDiscriminator(nn.Module):
         # rearrange inputs so that z axis in 3d is grouped with batch dim
         frames = rearrange(inputs, "b c h w d -> (b h) c w d")
         frames_rec = rearrange(reconstructions, "b c h w d -> (b h) c w d")
-        if cond is not None:
-            frame_cond = rearrange(cond, "b c h w d -> (b h) c w d")
+        if cond is not None: frame_cond = rearrange(cond, "b c h w d -> (b h) c w d")
+        b = frames.shape[0]
+        indices_to_select = torch.arange(b)[torch.randperm(b)][:self.n_frames]
+        frames, frames_rec = map(lambda i: i[indices_to_select], [frames, frames_rec])
+        if cond is not None: frame_cond = frame_cond[indices_to_select]
         
         rec_loss = self.pixel_loss(inputs.contiguous(), reconstructions.contiguous())
         if self.perceptual_weight > 0:
@@ -238,6 +253,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 assert not self.training
                 d_weight = torch.tensor(0.0)
                 
+            disc_factor = adopt_weight(self.disc_factor, global_step, threshold=self.discriminator_iter_start)
             # GAN feature matching loss - tune features such that we get the same prediction result on the discriminator
             frame_gan_feat_loss = 0
             ct_gan_feat_loss = 0
@@ -256,7 +272,6 @@ class VQLPIPSWithDiscriminator(nn.Module):
             else:
                 gan_feat_loss = torch.tensor(0.).to(g_loss.device)
 
-            disc_factor = adopt_weight(self.disc_factor, global_step, threshold=self.discriminator_iter_start)
             loss = nll_loss + d_weight * disc_factor * g_loss + self.codebook_weight * codebook_loss.mean() + self.gan_feat_weight * gan_feat_loss
 
             log = {"{}/total_loss".format(split): loss.clone().detach().mean(),

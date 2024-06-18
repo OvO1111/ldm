@@ -31,7 +31,8 @@ class BraTS2021_3D(Dataset):
                 crop_to=(96, 96, 96),
                 use_shm=False,
                 max_size=None,
-                n_fine=None):
+                n_fine=None,
+                base="/ailab/group/pjlab-smarthealth03/transfers/dailinrui/data/dataset/BraTS2021"):
         super().__init__()
         self.load_fn = lambda x: h5py.File(x)
         self.transforms = dict(
@@ -43,7 +44,7 @@ class BraTS2021_3D(Dataset):
         )
 
         self.split = split
-        base = "/ailab/group/pjlab-smarthealth03/transfers/dailinrui/data/dataset/BraTS2021" if not use_shm else "/dev/shm/BraTS2021"
+        if use_shm: base = "/dev/shm/BraTS2021"
         
         for spt in ["train", "val", "test"]:
             with open(f"{base}/{spt}.list") as fp:

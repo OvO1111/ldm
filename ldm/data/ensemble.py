@@ -2,9 +2,10 @@ import json, os, sys
 sys.path.append("/ailab/user/dailinrui/code/latentdiffusion")
 import numpy as np
 import torchio as tio
+import SimpleITK as sitk
 
-from torch.utils.data import default_collate, Dataset
-from ldm.data.utils import identity, LabelParser, OrganTypeBase, TorchioForegroundCropper
+from torch.utils.data import  Dataset
+from ldm.data.utils import identity, LabelParser, OrganTypeBase, TorchioForegroundCropper, TorchioBaseResizer
 from ldm.data.ruijin import Ruijin_3D
 from ldm.data.base import MSDDataset
 from functools import reduce
@@ -52,6 +53,7 @@ class MSDDatasetForEnsemble(MSDDataset):
 class RuijinForEnsemble(Ruijin_3D):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.transforms["resize_base"] = TorchioBaseResizer()
         self.transforms["crop"] = TorchioForegroundCropper(crop_level="mask_foreground", 
                                                             crop_anchor="totalseg",
                                                             crop_kwargs=dict(foreground_hu_lb=1e-3,
@@ -62,24 +64,28 @@ class RuijinForEnsemble(Ruijin_3D):
     def __getitem__(self, idx):
         item = self.data[self.split_keys[idx]] if isinstance(idx, int) else self.data[idx]
         data, totalseg, crcseg, text = map(lambda x: item[x], ["ct", "totalseg", "crcseg", "summary"])
+        spacing = self.get_spacing(data)
         image, mask, crcmask = map(self.load_fn, [data, totalseg, crcseg])
         
         if self.use_summary_level == "short": text = item.get("summary", "").split("；")[0]
         elif self.use_summary_level == "medium": text = item.get("summary", "")
         elif self.use_summary_level == "long": text = item.get("text", "")
         
-        subject = tio.Subject(image=tio.ScalarImage(tensor=image[None]), 
-                              mask=tio.ScalarImage(tensor=crcmask[None]),
-                              totalseg=tio.ScalarImage(tensor=mask[None]))
+        subject = tio.Subject(image=tio.ScalarImage(tensor=image[None], spacing=spacing), 
+                              mask=tio.LabelMap(tensor=crcmask[None], spacing=spacing),
+                              totalseg=tio.LabelMap(tensor=mask[None], spacing=spacing))
+        # resize based on spacing
+        subject = self.transforms["resize_base"](subject)
         # crop
         subject = self.transforms["crop"](subject)
+        ori_size = subject.image.data.shape
         # normalize
         subject = self.transforms["normalize_image"](subject)
         # resize
         subject = self.transforms["resize"](subject)
         # random aug
         subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
-        subject = {k: v.data for k, v in subject.items()} | {"text": text, "casename": self.split_keys[idx] if isinstance(idx, int) else idx}
+        subject = {k: v.data for k, v in subject.items()} | {"text": text, "casename": self.split_keys[idx] if isinstance(idx, int) else idx, "ori_size": ori_size}
         
         subject["totalseg"] = self.totalseg_parser.totalseg2mask(subject["totalseg"], OrganType)
         return subject
@@ -160,7 +166,7 @@ class EnsembleDataset(Dataset):
         
         item["mask"] *= getattr(self.labels, f"{tumor_type}Cancer").label
         item["mask"][item["mask"] == 0] = item["totalseg"][item["mask"] == 0]
-        sample = item | {"prompt": "，".join([key + "：" + str(value) for key, value in prompt.items()])}
+        sample = item | {"text": "，".join([key + "：" + str(value) for key, value in prompt.items()])}
         if self.preprocessed_context is not None: sample = sample | {"context": self.preprocessed_context[sample["casename"]]}
         return sample
     

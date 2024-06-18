@@ -1,10 +1,9 @@
 import torch
+import torch.nn as nn
 import numpy as np
 import pytorch_lightning as pl
 import torch.nn.functional as F
 from contextlib import contextmanager
-
-from taming.modules.vqvae.quantize import VectorQuantizer as VectorQuantizer
 
 from ldm.modules.diffusionmodules.model import Encoder, Decoder
 from ldm.modules.distributions.distributions import DiagonalGaussianDistribution
@@ -13,6 +12,104 @@ from ldm.modules.ema import LitEma
 from ldm.util import instantiate_from_config
 from torch.optim.lr_scheduler import LambdaLR
 from einops import rearrange
+
+# taming.modules.vqvae.quantize.VectorQuantizer
+class VectorQuantizer(nn.Module):
+    """
+    see https://github.com/MishaLaskin/vqvae/blob/d761a999e2267766400dc646d82d3ac3657771d4/models/quantizer.py
+    ____________________________________________
+    Discretization bottleneck part of the VQ-VAE.
+    Inputs:
+    - n_e : number of embeddings
+    - e_dim : dimension of embedding
+    - beta : commitment cost used in loss term, beta * ||z_e(x)-sg[e]||^2
+    _____________________________________________
+    """
+
+    def __init__(self, n_e, e_dim, beta, dims=3):
+        super(VectorQuantizer, self).__init__()
+        self.n_e = n_e
+        self.e_dim = e_dim
+        self.beta = beta
+        self.dims = dims
+
+        self.embedding = nn.Embedding(self.n_e, self.e_dim)
+        self.embedding.weight.data.uniform_(-1.0 / self.n_e, 1.0 / self.n_e)
+
+    def forward(self, z):
+        """
+        Inputs the output of the encoder network z and maps it to a discrete
+        one-hot vector that is the index of the closest embedding vector e_j
+        z (continuous) -> z_q (discrete)
+        z.shape = (batch, channel, height, width)
+        quantization pipeline:
+            1. get encoder input (B,C,H,W)
+            2. flatten input to (B*H*W,C)
+        """
+        # reshape z -> (batch, height, width, channel) and flatten
+        z = rearrange(z, "b c ... -> b ... c").contiguous()
+        z_flattened = z.view(-1, self.e_dim)
+        # distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
+
+        d = torch.sum(z_flattened ** 2, dim=1, keepdim=True) + \
+            torch.sum(self.embedding.weight**2, dim=1) - 2 * \
+            torch.matmul(z_flattened, self.embedding.weight.t())
+
+        ## could possible replace this here
+        # #\start...
+        # find closest encodings
+        min_encoding_indices = torch.argmin(d, dim=1).unsqueeze(1)
+
+        min_encodings = torch.zeros(
+            min_encoding_indices.shape[0], self.n_e).to(z)
+        min_encodings.scatter_(1, min_encoding_indices, 1)
+
+        # dtype min encodings: torch.float32
+        # min_encodings shape: torch.Size([2048, 512])
+        # min_encoding_indices.shape: torch.Size([2048, 1])
+
+        # get quantized latent vectors
+        z_q = torch.matmul(min_encodings, self.embedding.weight).view(z.shape)
+        #.........\end
+
+        # with:
+        # .........\start
+        #min_encoding_indices = torch.argmin(d, dim=1)
+        #z_q = self.embedding(min_encoding_indices)
+        # ......\end......... (TODO)
+
+        # compute loss for embedding
+        loss = torch.mean((z_q.detach()-z)**2) + self.beta * \
+            torch.mean((z_q - z.detach()) ** 2)
+
+        # preserve gradients
+        z_q = z + (z_q - z).detach()
+
+        # perplexity
+        e_mean = torch.mean(min_encodings, dim=0)
+        perplexity = torch.exp(-torch.sum(e_mean * torch.log(e_mean + 1e-10)))
+
+        # reshape back to match original input shape
+        z_q = rearrange(z_q, "b ... c -> b c ...").contiguous()
+
+        return z_q, loss, (perplexity, min_encodings, min_encoding_indices)
+
+    def get_codebook_entry(self, indices, shape):
+        # shape specifying (batch, height, width, channel)
+        # TODO: check for more easy handling with nn.Embedding
+        min_encodings = torch.zeros(indices.shape[0], self.n_e).to(indices)
+        min_encodings.scatter_(1, indices[:,None], 1)
+
+        # get quantized latent vectors
+        z_q = torch.matmul(min_encodings.float(), self.embedding.weight)
+
+        if shape is not None:
+            z_q = z_q.view(shape)
+
+            # reshape back to match original input shape
+            z_q = rearrange(z_q, "b ... c -> b c ...").contiguous()
+
+        return z_q
 
 
 class VQModel(pl.LightningModule):
@@ -33,7 +130,7 @@ class VQModel(pl.LightningModule):
                  sane_index_shape=False, # tell vector quantizer to return indices as bhw
                  use_ema=False,
                  l1_weight=0.5,
-                 dims=3,
+                 dims=3, is_conditional=False, cond_key=None, conditioning_key="concat"
                  ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -43,14 +140,15 @@ class VQModel(pl.LightningModule):
         self.decoder = Decoder(**ddconfig)
         if "params" in lossconfig:
             lossconfig["params"]["dims"] = dims
+            lossconfig["params"]["n_classes"] = n_embed
         self.loss = instantiate_from_config(lossconfig)
-        self.quantize = VectorQuantizer(n_embed, embed_dim, beta=0.25,)
+        self.quantize = VectorQuantizer(n_embed, embed_dim, beta=0.25, dims=dims)
                                         # remap=remap,
                                         # sane_index_shape=sane_index_shape)
         self.dims = dims
         self.l1_weight = l1_weight
         self.conv_nd = torch.nn.Conv2d if dims == 2 else torch.nn.Conv3d
-        self.quant_conv = self.conv_nd(2*ddconfig["z_channels"], embed_dim, 1)
+        self.quant_conv = self.conv_nd(ddconfig["z_channels"], embed_dim, 1)
         self.post_quant_conv = self.conv_nd(embed_dim, ddconfig["z_channels"], 1)
         if colorize_nlabels is not None:
             assert type(colorize_nlabels)==int
@@ -70,6 +168,11 @@ class VQModel(pl.LightningModule):
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
         self.scheduler_config = scheduler_config
         self.lr_g_factor = lr_g_factor
+        self.is_conditional = is_conditional
+        if is_conditional:
+            self.cond_key = cond_key
+            self.conditioning_key = conditioning_key
+            assert self.cond_key is not None
 
     @contextmanager
     def ema_scope(self, context=None):
@@ -104,8 +207,8 @@ class VQModel(pl.LightningModule):
         if self.use_ema:
             self.model_ema(self)
 
-    def encode(self, x):
-        h = self.encoder(x)
+    def encode(self, x, c_cat=None):
+        h = self.encoder(x, {f"c_{self.conditioning_key}": c_cat} if c_cat is not None else None)
         h = self.quant_conv(h)
         quant, emb_loss, info = self.quantize(h)
         return quant, emb_loss, info
@@ -115,9 +218,9 @@ class VQModel(pl.LightningModule):
         h = self.quant_conv(h)
         return h
 
-    def decode(self, quant):
+    def decode(self, quant, c_cat=None):
         quant = self.post_quant_conv(quant)
-        dec = self.decoder(quant)
+        dec = self.decoder(quant, {f"c_{self.conditioning_key}": c_cat} if c_cat is not None else None)
         return dec
 
     def decode_code(self, code_b):
@@ -125,9 +228,9 @@ class VQModel(pl.LightningModule):
         dec = self.decode(quant_b)
         return dec
 
-    def forward(self, input, return_pred_indices=False):
-        quant, diff, (_,_,ind) = self.encode(input)
-        dec = self.decode(quant)
+    def forward(self, input, cond=None, return_pred_indices=False):
+        quant, diff, (_,_,ind) = self.encode(input, cond)
+        dec = self.decode(quant, cond)
         if return_pred_indices:
             return dec, diff, ind
         return dec, diff
@@ -136,14 +239,12 @@ class VQModel(pl.LightningModule):
         x = batch[k]
         if self.dims == 2:
             if len(x.shape) == 3:
-                x = x[..., None]
-            x = x.permute(0, 3, 1, 2).to(memory_format=torch.contiguous_format).float()
+                x = x[:, None]
+            x = x.to(memory_format=torch.contiguous_format).float()
         elif self.dims == 3:
             if len(x.shape) == 4:
-                x = x[..., None]
-                x = x.permute(0, 4, 1, 2, 3).to(memory_format=torch.contiguous_format).float()
-            else:
-                x = x.to(memory_format=torch.contiguous_format).float()
+                x = x[:, None]
+            x = x.to(memory_format=torch.contiguous_format).float()
         if self.batch_resize_range is not None:
             lower_size = self.batch_resize_range[0]
             upper_size = self.batch_resize_range[1]
@@ -161,7 +262,9 @@ class VQModel(pl.LightningModule):
         # https://github.com/pytorch/pytorch/issues/37142
         # try not to fool the heuristics
         x = self.get_input(batch, self.image_key)
-        xrec, qloss, ind = self(x, return_pred_indices=True)
+        if self.is_conditional: c_cat = self.get_input(batch, self.cond_key)
+        else: c_cat = None
+        xrec, qloss, ind = self(x, c_cat, return_pred_indices=True)
         # loss = F.smooth_l1_loss(x, xrec) * self.l1_weight
 
         if optimizer_idx == 0:
@@ -188,7 +291,9 @@ class VQModel(pl.LightningModule):
 
     def _validation_step(self, batch, batch_idx, suffix=""):
         x = self.get_input(batch, self.image_key)
-        xrec, qloss, ind = self(x, return_pred_indices=True)
+        if self.is_conditional: c_cat = self.get_input(batch, self.cond_key)
+        else: c_cat = None
+        xrec, qloss, ind = self(x, c_cat, return_pred_indices=True)
         
         aeloss, log_dict_ae = self.loss(qloss, x, xrec, 0,
                                         self.global_step,
@@ -255,22 +360,28 @@ class VQModel(pl.LightningModule):
         log = dict()
         x = self.get_input(batch, self.image_key)
         x = x.to(self.device)
+        if self.is_conditional: conditions = self.get_input(batch, self.cond_key)
+        else: conditions = None
         if only_inputs:
             log["inputs"] = x
             return log
-        xrec, _ = self(x)
-        if x.shape[1] > 3:
+        xrec, _ = self(x, conditions)
+        if x.shape[1] == 3:
             # colorize with random projection
-            assert xrec.shape[1] > 3
+            assert xrec.shape[1] == 3
             x = self.to_rgb(x)
             xrec = self.to_rgb(xrec)
         log["inputs"] = x
         log["reconstructions"] = xrec
         if plot_ema:
             with self.ema_scope():
-                xrec_ema, _ = self(x)
+                xrec_ema, _ = self(x, conditions)
                 if x.shape[1] > 3: xrec_ema = self.to_rgb(xrec_ema)
                 log["reconstructions_ema"] = xrec_ema
+                
+        if self.is_conditional:
+            y = self.get_input(batch, self.cond_key)
+            log["conditioning"] = y
         return log
 
     def to_rgb(self, x):
