@@ -1,9 +1,12 @@
 import os
 import json
+import h5py
 import torch
+import omegaconf
 import torch.nn as nn
 import numpy as np
 import SimpleITK as sitk
+import scipy.ndimage as ndm
 
 from enum import IntEnum
 from tqdm import tqdm
@@ -149,7 +152,7 @@ class MakeDataset:
         self.create_split = create_split
         
         self.dataset = dict()
-        for key in include_keys: os.makedirs(os.path.join(self.base, key), exist_ok=True)
+        for key in suffixes.keys(): os.makedirs(os.path.join(self.base, key), exist_ok=True)
         
     def add(self, samples, sample_names=None, dtypes={}):
         if not exists(sample_names): sample_names = [f"case_{len(self.dataset) + i}" for i in range(self.bs)]
@@ -167,16 +170,20 @@ class MakeDataset:
                     f = os.path.join(self.base, key, sample_name_b + self.suffixes[key])
                     im = value_b.cpu().data.numpy().astype(dtypes.get(key, np.float32))
                     assert im.ndim == self.dims + 1, f"desired ndim {self.dims} and actual ndim {im.shape} not match"
-                    sitk.WriteImage(sitk.GetImageFromArray(rearrange(im, "c ... -> ... c")), f)
+                    sitk.WriteImage(sitk.GetImageFromArray(rearrange(self.postprocess(im), "c ... -> ... c")), f)
                     self.dataset[sample_name_b][key] = f
                 if isinstance(value_b, str):
                     self.dataset[sample_name_b][key] = value_b
+                    
+    def postprocess(self, sample):
+        # c h w d
+        return sample
         
     def finalize(self):
         dataset = {}
         dataset["data"] = self.dataset
         dataset["desc"] = self.desc
-        dataset["keys"] = self.include_keys
+        dataset["keys"] = omegaconf.OmegaConf.to_container(self.include_keys)
         dataset["length"] = len(self.dataset)
         
         if self.create_split:
@@ -319,14 +326,15 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
     #     return logs
     
     @torch.no_grad()
-    def p_sample(self, q_xT=None, c=None, verbose=False, 
+    def p_sample(self, q_xT=None, c=None, verbose=False, timesteps=None,
                  plot_progressive_rows=False, 
                  plot_denoising_rows=False, plot_diffusion_every_t=200):
         logs = dict()
         with self.ema_scope():
             c = c if exists(c) else dict()
             p_xt, b = q_xT, q_xT.shape[0]
-            t_values = reversed(range(1, self.timesteps)) if not verbose else tqdm(reversed(range(1, self.timesteps)), total=self.timesteps-1, desc="sampling progress")
+            timesteps = self.timesteps if not exists(timesteps) else timesteps
+            t_values = reversed(range(1, timesteps)) if not verbose else tqdm(reversed(range(1, timesteps)), total=timesteps-1, desc="sampling progress")
             
             if plot_denoising_rows: denoising_rows = []
             if plot_progressive_rows: progressive_rows = []
@@ -347,14 +355,17 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
                     p_xt = torch.clamp(self.q_xtm1_given_x0pred_xt(p_xt, p_x0_given_xt, t_), min=1e-12)
                     p_xt = OneHotCategoricalBCHW(probs=p_xt).sample()
                 else:
-                    # alphas_t = extract_into_tensor(self.alphas, t_, p_xt.shape)
-                    # cumalphas_t = extract_into_tensor(self.alphas_cumprod, t_, p_xt.shape)
+                    alphas_t = extract_into_tensor(self.alphas, t_, p_xt.shape)
+                    cumalphas_t = extract_into_tensor(self.alphas_cumprod, t_, p_xt.shape)
                     # cumalphas_tm1 = cumalphas_t / alphas_t
                     # xt_coeff = (alphas_t - cumalphas_t) / (1 - cumalphas_t)
                     # x0_coeff = alphas_t * (cumalphas_tm1 - cumalphas_t) ** 2 / (1 - cumalphas_t) ** 2
                     # p_xt = torch.clamp(xt_coeff * p_xt ** 2 + x0_coeff * (p_x0_given_xt * p_xt - p_x0_given_xt ** 2), min=1e-12)
                     # p_xt = p_xt / p_xt.sum(1, keepdim=True)
-                    eps = self.get_noise(torch.zeros_like(q_xT))
+                    
+                    # eps = self.get_noise(torch.zeros_like(q_xT))
+                    
+                    eps = (p_xt - p_x0_given_xt * cumalphas_t) / (1 - cumalphas_t)
                     p_xt = torch.clamp(self.q_xtm1_given_x0_xt(p_xt, p_x0_given_xt, t_, eps), min=1e-12)
                 
                 if plot_denoising_rows and t % plot_diffusion_every_t == 0: denoising_rows.append(p_x0_given_xt)
@@ -366,10 +377,10 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
             x0pred = OneHotCategoricalBCHW(probs=p_xt).prob_sample()
             
         logs["samples"] = x0pred.argmax(1)
-        if plot_denoising_rows:
+        if plot_denoising_rows and len(denoising_rows) > 0:
             denoising_rows = OneHotCategoricalBCHW(probs=torch.cat(denoising_rows, dim=0)).max_prob_sample()
             logs["p(x0|xt) at different timestep"] = denoising_rows.argmax(1)
-        if plot_progressive_rows:
+        if plot_progressive_rows and len(progressive_rows) > 0:
             progressive_rows = OneHotCategoricalBCHW(probs=torch.cat(progressive_rows, dim=0)).max_prob_sample()
             logs["p(x_{t-1}|xt) at different timestep"] = progressive_rows.argmax(1)
         
@@ -449,12 +460,57 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
             self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             return metrics, logs
         return {}, logs
+    
+    def postprocess(self, sample):
+        all_labels = np.unique(sample).flatten()
+        for i in all_labels:
+            labeled_sample, _ = ndm.label(sample[0] == i)
+            labeled_sample_counts = np.bincount(labeled_sample.flatten())
+            few_labels = np.argwhere(labeled_sample_counts < 50).flatten()
+            
+            for j in few_labels:
+                sample[:, labeled_sample == j] = 255
+            while (sample == 255).sum() > 0:
+                itr_surrounding = ndm.binary_dilation(sample[0] == 255)
+                itr_uniques = np.unique(sample[0, itr_surrounding]).flatten()
+                for isur in itr_uniques:
+                    if isur != 255: sample[:, itr_surrounding & ndm.binary_dilation(sample[0] == isur, mask=(sample[0] == 255))] = isur
+        return sample.astype(np.uint8)
         
 
-class InferMixedDiffusion(InferLatentDiffusion):
-    def __init__(self, mix_scheme="latent", **diffusion_kwargs):
+class InferMixedDiffusion(InferLatentDiffusion, MakeDataset):
+    def __init__(self, 
+                 mix_scheme="latent", 
+                 save_dataset=False,
+                 save_dataset_path=None,
+                 include_keys=["data", "text"],
+                 suffix_keys={"data":".nii.gz",},
+                 **diffusion_kwargs):
         self.mix_scheme = mix_scheme
+        if save_dataset:
+            self.save_dataset = save_dataset
+            assert exists(save_dataset_path)
+            MakeDataset.__init__(self, save_dataset_path, include_keys, suffix_keys)
         super().__init__(**diffusion_kwargs)
+        
+    def add(self, samples, sample_names=None, dtypes={}):
+        if not exists(sample_names): sample_names = [f"case_{len(self.dataset) + i}" for i in range(self.bs)]
+        if isinstance(sample_names, str): sample_names = [sample_names]
+        for i in range(len(sample_names)): 
+            while sample_names[i] in self.dataset: sample_names[i] = sample_names[i] + "0"
+        B = samples[self.include_keys[0]].shape[0]
+        
+        for b in range(B):
+            sample_name_b = sample_names[b]
+            f = os.path.join(self.base, "data", sample_name_b + ".h5")
+            h5 = h5py.File(f, "w")
+            for key in self.include_keys:
+                value_b = samples[key][b]
+                if isinstance(value_b, torch.Tensor):
+                    im = value_b.cpu().data.numpy().astype(dtypes.get(key, np.float32))
+                    h5.create_dataset(key, data=self.postprocess(im), compression="gzip")
+            self.dataset[sample_name_b] = f
+            h5.close()
         
     @staticmethod
     def _get_foreground_bbox(tensor, use_shape_on_background=False):
@@ -540,7 +596,7 @@ class InferMixedDiffusion(InferLatentDiffusion):
                         z_fine_reshaped[i][:, :, mask_fine_reshaped[i][0, 0] == 0] = z_coarse[*z_coarse_masked_cropped[i]][:, :, mask_fine_reshaped[i][0, 0] == 0]
                         mask_fine_reshaped[i][:, :, mask_fine_reshaped[i][0, 0] == 0] = mask_coarse[*z_coarse_masked_cropped[i]][:, :, mask_fine_reshaped[i][0, 0] == 0]
                         z_local_mix.append(z_fine_reshaped[i] * (1 - alpha) + z_coarse[*z_coarse_masked_cropped[i]] * alpha)
-                        mask_local_mix.append(mask_fine_reshaped[i] * (1 - alpha))
+                        mask_local_mix.append(mask_fine_reshaped[i])
                         
                     for i in range(B - primary_batch_size): z_coarse[i, *z_coarse_masked_cropped[i][1:]] = z_local_mix[i]
                     for i in range(B - primary_batch_size): mask_coarse[i, *z_coarse_masked_cropped[i][1:]] = mask_local_mix[i]
@@ -583,7 +639,7 @@ class InferMixedDiffusion(InferLatentDiffusion):
                         i_fine_reshaped[i][:, :, mask_coarse[*i_coarse_masked_cropped[i]][0, 0] == 0] = i_coarse[*i_coarse_masked_cropped[i]][:, :, mask_coarse[*i_coarse_masked_cropped[i]][0, 0] == 0]
                         mask_fine_reshaped[i][:, :, mask_coarse[*i_coarse_masked_cropped[i]][0, 0] == 0] = 0
                         i_local_mix.append(i_fine_reshaped[i] * (1 - alpha) + i_coarse[*i_coarse_masked_cropped[i]] * alpha)
-                        mask_local_mix.append(mask_fine_reshaped[i] * (1 - alpha))
+                        mask_local_mix.append(mask_fine_reshaped[i])
                         
                     for i in range(B - primary_batch_size): i_coarse[i, *i_coarse_masked_cropped[i][1:]] = i_local_mix[i]
                     for i in range(B - primary_batch_size): mask_coarse[i, *i_coarse_masked_cropped[i][1:]] = mask_local_mix[i]
@@ -591,14 +647,21 @@ class InferMixedDiffusion(InferLatentDiffusion):
                     mask_mix.append(mask_coarse)
                 
                 i_mix, mask_mix = torch.cat(i_mix, dim=0), torch.cat(mask_mix, dim=0)
-                i_mix = self.p_sample_loop(cond=c[primary_batch_size:], shape=i_mix.shape, x_T=i_mix, timesteps=100, verbose=True)
+                z_mix = self.encode_first_stage(i_mix, cf[primary_batch_size:])
+                z_mix = self.p_sample_loop(cond=c[primary_batch_size:], shape=z_mix.shape, x_T=z_mix, timesteps=100, verbose=True)
+                i_mix = self.decode_first_stage(z_mix, cf[primary_batch_size:])
                 logs["mixed_samples"] = i_mix
                 logs["mixed_fine"] = mask_mix
                 logs["mixed_coarse"] = ((mask_mix > 0) | (cx[primary_batch_size:] > 0)).float()
                 logs["mix_log"] = ','.join(mix_log)
+                logs["alpha"] = torch.tensor([alpha,] * i_mix.shape[0])[:, None]
             
         x = logs["inputs"]
         x_samples = logs["samples"]
+        
+        if self.save_dataset:
+            self.add(logs, batch.get("casename"), dtypes={"mixed_fine": np.uint8, "mixed_coarse": np.uint8})
+        
         if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
             metrics = self.log_eval(x_samples, x, log_group_metrics_in_2d)
             # print(metrics)

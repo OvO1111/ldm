@@ -42,7 +42,6 @@ model:
 
     cond_stage_config: 
       target: torch.nn.Identity
-      params:
 
     loss_config:
       # ce_loss:

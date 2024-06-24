@@ -92,6 +92,6 @@ class MSDDataset(Dataset):
         subject = self.transforms["resize"](subject)
         # random aug
         subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
-        subject = {k: v.data for k, v in subject.items()} | {"ids": idx, 'casename': self.split_keys[idx] if isinstance(idx, int) else idx, "ori_size": ori_size}
+        subject = {k: v.data for k, v in subject.items()} | {'casename': self.split_keys[idx] if isinstance(idx, int) else idx, "ori_size": ori_size}
 
         return subject

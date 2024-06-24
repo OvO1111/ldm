@@ -68,8 +68,10 @@ class CategoricalDiffusion(pl.LightningModule):
                  cond_stage_trainable=False,
                  cond_stage_forward=None,
                  use_automatic_optimization=True,
+                 dims=3,
                  **kwargs) -> None:
         super().__init__()
+        self.dims = dims
         self.data_key = data_key
         self.cond_key = cond_key
         self.loss_type = loss_type
@@ -192,8 +194,6 @@ class CategoricalDiffusion(pl.LightningModule):
         self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
      
     def get_input(self, batch, data_key, cond_key):
-        if self.global_step == 71: 
-            d = 1
         x = batch.get(data_key)
         x = rearrange(f.one_hot(x.long(), self.num_classes), "b 1 h w d x -> b x h w d")
         c = self.cond_stage_model(batch.get(cond_key))

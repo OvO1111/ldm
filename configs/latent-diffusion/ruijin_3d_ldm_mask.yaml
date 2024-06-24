@@ -7,6 +7,7 @@ model:
     num_timesteps_cond: 1
     log_every_t: 200
     timesteps: 1000
+    loss_type: l1
     first_stage_key: mask
     cond_stage_key: context
     conditioning_key: crossattn
@@ -37,14 +38,14 @@ model:
         image_key: mask
         embed_dim: 4
         dims: 3
-        ckpt_path: /ailab/user/dailinrui/data/ldm/ruijin_mask_vae_kl_64_128_128/checkpoints/epoch=000039.ckpt
+        ckpt_path: /ailab/user/dailinrui/data/ldm/ruijin_mask_vae_kl_64_128_128/checkpoints/epoch=000080.ckpt
         lossconfig:
           target: torch.nn.Identity
 
         ddconfig:
           double_z: True
           z_channels: 1
-          resolution: [96, 192, 192]
+          resolution: [64, 128, 128]
           in_channels: 1
           out_ch: 1
           ch: 96

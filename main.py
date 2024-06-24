@@ -9,9 +9,8 @@ import pytorch_lightning as pl
 
 from packaging import version
 from omegaconf import OmegaConf
-from torch.utils.data import random_split, DataLoader, Dataset, Subset, _utils
+from torch.utils.data import DataLoader, Dataset, _utils
 from functools import partial
-from PIL import Image
 from queue import Queue
 
 from pytorch_lightning import seed_everything
@@ -23,7 +22,7 @@ from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.data.base import Txt2ImgIterableBaseDataset
 from ldm.util import instantiate_from_config, get_obj_from_str
-from inference.utils import TwoStreamBatchSampler, image_logger, combine_mask_and_im
+from inference.utils import TwoStreamBatchSampler, image_logger, visualize, combine_mask_and_im, combine_mask_and_im_v2
 
 
 def default(x, defval=None):
@@ -332,8 +331,8 @@ class ImageLogger(Callback):
             WandbLogger: self._wandb,
             TensorBoardLogger: self._board
         } if not log_local_only else {}
-        self.log_steps_tr = [2 ** n for n in range(int(np.log2(self.batch_freq_tr)) + 1)]
-        self.log_steps_val = [2 ** n for n in range(int(np.log2(self.batch_freq_val)) + 1)]
+        self.log_steps_tr = [10 ** n for n in range(int(np.log10(self.batch_freq_tr)) + 1)]
+        self.log_steps_val = [10 ** n for n in range(int(np.log10(self.batch_freq_val)) + 1)]
         self.clamp = clamp
         self.disabled = disabled
         self.log_on_batch_idx = log_on_batch_idx
@@ -343,11 +342,11 @@ class ImageLogger(Callback):
         
         def _get_logger(target, params):
             if target == "mask_rescale":
-                return lambda x: (x.long(), dict(params) | {"is_mask": True})
+                return lambda x: visualize(x.long(), **params)
             if target == "image_rescale":
-                return lambda x: ((x - x.min()) / (x.max() - x.min()), {})
+                return lambda x: visualize((x - x.min()) / (x.max() - x.min()), **params)
             if target == "image_and_mask":
-                return lambda x: (combine_mask_and_im(x, n=params.get("n_mask"), overlay_coef=params.get("overlay_coef", .2)), {})
+                return lambda x: combine_mask_and_im_v2(x, **params)
         
         self.log_nifti = log_nifti
         if self.log_nifti: 
@@ -358,7 +357,7 @@ class ImageLogger(Callback):
         
         self.logger = {}
         for name, val in logger.items():
-            self.logger[name] = _get_logger(val["target"], val.get("params"))
+            self.logger[name] = _get_logger(val["target"], val.get("params", {}))
             
     @rank_zero_only
     def _wandb(self, pl_module, images, batch_idx, split):

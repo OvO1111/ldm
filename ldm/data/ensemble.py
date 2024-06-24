@@ -1,11 +1,12 @@
 import json, os, sys
 sys.path.append("/ailab/user/dailinrui/code/latentdiffusion")
+from re import findall
+import torch
 import numpy as np
 import torchio as tio
-import SimpleITK as sitk
 
 from torch.utils.data import  Dataset
-from ldm.data.utils import identity, LabelParser, OrganTypeBase, TorchioForegroundCropper, TorchioBaseResizer
+from ldm.data.utils import identity, window_norm, LabelParser, OrganTypeBase, TorchioForegroundCropper, TorchioBaseResizer
 from ldm.data.ruijin import Ruijin_3D
 from ldm.data.base import MSDDataset
 from functools import reduce
@@ -29,7 +30,7 @@ CancerType = [
     OrganTypeBase("ColorectalCancer", 11),
     OrganTypeBase("LiverCancer", 12),
     OrganTypeBase("PancreaticCancer", 13),
-    OrganTypeBase("LungCancer", 14),
+    OrganTypeBase("LungCancer", 14),   # not yet added
 ]
 
 
@@ -43,6 +44,7 @@ class MSDDatasetForEnsemble(MSDDataset):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.totalseg_parser = LabelParser(totalseg_version="v2")
+        self.transforms["normalize_image"] = tio.Lambda(window_norm, include=["image"])
         
     def __getitem__(self, idx):
         sample = super().__getitem__(idx)
@@ -121,9 +123,8 @@ class EnsembleDataset(Dataset):
         self.split = split
         self.labels = LocalLabel()
         self.split_keys = reduce(lambda x, y: x + y, [[(_, k) for k in self.__dict__[_].split_keys]
-                                                      for _ in self.__dict__ if _.endswith("_dataset")])
+                                                      for _ in self.__dict__ if _.endswith("_dataset")], [])
         self.prompt_field = prompt_field
-        self.totalseg_parser = LabelParser(totalseg_version="v2")
         self.preprocessed_context = np.load(preprocessed_context_dir) if use_preprocessed_context else None
         
     def __len__(self):
@@ -133,12 +134,65 @@ class EnsembleDataset(Dataset):
         person = self.ruijin_info.get(key, {"birth_date": "2018", "gender": "无"})
         age = 2018 - int(person["birth_date"].split("-")[0])
         gender = person["gender"]
-        return age, gender
+        return age, gender if gender in ["男", "女"] else "无"
     
     def get_msd_info(self, totalseg):
         check_sex = (totalseg == 22).sum() > 0  # check for Prostate label (v2)
+        check_ct_cover = (totalseg == 20).sum() > 0
         if check_sex: return 0, "男"
-        else: return 0, "女"
+        if check_ct_cover: return 0, "女"
+        else: return 0, "无"
+        
+    def parse(self, feat):
+        if isinstance(feat, str):
+            if "男" in feat:
+                return torch.tensor([0, 1, 0]).float()
+            elif "女" in feat: 
+                return torch.tensor([0, 0, 1]).float()
+            elif "无" in feat:
+                return torch.tensor([1, 0, 0]).float()
+            elif "年龄" in feat: 
+                feat = int(findall(r"[0-9]+", feat))
+            else:
+                # parse cancer location into integers of one-hot vectors of 1-7, 0 is reserved
+                if "肝" in feat: return torch.tensor([0, 1,] + [0,] * 7).float()
+                if "胰" in feat: return torch.tensor([0, 0, 1] + [0,] * 6).float()
+                if "肺" in feat: return torch.tensor([0, 0, 0, 1] + [0,] * 5).float()
+                vector = [0,] * 9
+                if "升" in feat: vector[-5] = 1
+                if "横" in feat: vector[-4] = 1
+                if "降" in feat: vector[-3] = 1
+                if "乙" in feat: vector[-2] = 1
+                if "直" in feat: vector[-1] = 1
+                if sum(vector) == 0: vector[0] = 1
+                return torch.tensor(vector).float() / sum(vector)
+        if isinstance(feat, int):
+            # age
+            age_group = [0,] * 11
+            age_group[min(max(0, feat // 10), 100)] = 1
+            return torch.tensor(age_group).float()
+        
+    def rev_parse(self, feat_dict):
+        feat = ""
+        for k, v in feat_dict.items():
+            for vb in v:
+                vb = vb.softmax(0)
+                feat += str(k) + "="
+                if k == 'age': feat += str(dict(zip(
+                    ["-"] + [f"age{i*10}-{(i+1)*10}" for i in range(1, 10)] + ["age>100"], 
+                    [round(_.item(), 3) for _ in vb]
+                )))
+                if k == 'sex': feat += str(dict(zip(
+                    ["-", "male", "female"], 
+                    [round(_.item(), 3) for _ in vb]
+                )))
+                elif k == "tumor_loc": feat += str(dict(zip(
+                    ["-", "liver", "pancreas", "lung", "ascendant", "transversal", "descendant", "sigmoid", "rectum"],
+                    [round(_.item(), 3) for _ in vb]
+                )))
+                feat += " ; "
+            feat += " \n "
+        return feat
         
     def __getitem__(self, idx):
         dataset_name, dataset_idx = self.split_keys[idx]
@@ -167,6 +221,8 @@ class EnsembleDataset(Dataset):
         item["mask"] *= getattr(self.labels, f"{tumor_type}Cancer").label
         item["mask"][item["mask"] == 0] = item["totalseg"][item["mask"] == 0]
         sample = item | {"text": "，".join([key + "：" + str(value) for key, value in prompt.items()])}
+        
+        sample = sample | {"age": self.parse(age), "sex": self.parse(sex), "tumor_loc": self.parse(prompt["肿瘤位置"])}
         if self.preprocessed_context is not None: sample = sample | {"context": self.preprocessed_context[sample["casename"]]}
         return sample
     

@@ -25,8 +25,8 @@ model:
 
     # whether use legacy
     use_legacy: true
-    parameterization: kl
-    ckpt_path: /ailab/user/dailinrui/data/ccdm/ruijin_ensemble_64_128_128_baseline/checkpoint/checkpoint_ep106_gs312012.ckpt
+    parameterization: kl 
+    ckpt_path: /ailab/user/dailinrui/data/ccdm/ruijin_ensemble_64_128_128_baseline/checkpoint/checkpoint_ep50_gs148818.ckpt
 
     # make dataset
     save_dataset: true 
@@ -38,11 +38,11 @@ model:
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.CCDMUNetModel
       params:
-        image_size: [64, 128, 128]
+        image_size: [128, 128, 128]
         model_channels: 64
-        attention_resolutions: [32,16,8]
-        num_res_blocks: 2
-        channel_mult: [1,2,2,4,8]
+        attention_resolutions: [8,16]
+        num_res_blocks: 1
+        channel_mult: [1,1,2,2,4]
         use_spatial_transformer: true
         context_dim: 768
         num_heads: 1
@@ -73,8 +73,10 @@ data:
     test:
       target: ldm.data.ensemble.EnsembleDataset
       params:
+        use_dataset_name: [liver]
         split: train
-        resize_to: [64, 128, 128]
+        resize_to: [128, 128, 128]
+        max_size: 50
 
 lightning:
   callbacks:
@@ -82,13 +84,14 @@ lightning:
       target: test.ImageLogger
       params:
         test_batch_frequency: 1
-        max_images: 10
+        max_images: -1
         log_images_kwargs:
           plot_denoising_rows: true
           verbose: true
           log_metrics: true
           ddim_steps: null
           log_group_metrics_in_2d: true
+          timesteps: null
         logger:
           inputs: 
             target: mask_rescale

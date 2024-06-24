@@ -8,9 +8,11 @@ from torch.optim.lr_scheduler import LambdaLR
 from copy import deepcopy
 from einops import rearrange
 from glob import glob
+import numpy as np
 from natsort import natsorted
 
 from ldm.modules.encoders.modules import TransformerEmbedder
+from ldm.modules.diffusionmodules.model import Encoder
 from ldm.modules.diffusionmodules.openaimodel import EncoderUNetModel, UNetModel
 from ldm.util import log_txt_as_img, default, ismap, instantiate_from_config
 
@@ -266,3 +268,141 @@ class NoisyLatentImageClassifier(pl.LightningModule):
             log[key] = log[key][:N]
 
         return log
+    
+    
+class CharacteristicClassifier(pl.LightningModule):
+    def __init__(self, 
+                 encoder_config,
+                 feature_encoder_config=None,
+                 num_feature_classes={"sex": 2},
+                 ckpt_path=None,
+                 data_key="image",
+                 feature_key=["sex"],
+                 dims=3,
+                 ignore_keys=[],
+                 training_encoder=False,
+                 only_load_encoder=False,
+                 monitor='val/loss',
+                 embed_dim=64,
+                 activation="relu",
+                 ):
+        super().__init__()
+        self.dims = dims
+        self.data_key = data_key
+        self.monitor = monitor
+        self.feature_key = OmegaConf.to_container(feature_key)
+        self.encoder = instantiate_from_config(encoder_config)
+        self.training_encoder = training_encoder
+        if not training_encoder:
+            for p in self.encoder.parameters():
+                p.detach_().requires_grad_(False)
+        
+        network_out = round(np.prod(np.array(self.encoder.resolution)) / 2 ** (self.dims * (self.encoder.num_resolutions - 1)))
+        self.classifiers = torch.nn.ModuleDict()
+        conv_nd = getattr(torch.nn, f"Conv{self.dims}d", torch.nn.Identity)
+        batchnorm_nd = getattr(torch.nn, f"BatchNorm{self.dims}d", torch.nn.Identity)
+        if activation == "relu":
+            activation = torch.nn.ReLU
+        elif activation == "leakyrelu":
+            activation = torch.nn.LeakyReLU
+        for key in feature_key:
+            classifier = torch.nn.ModuleList()
+            feature_encoder = Encoder(**feature_encoder_config)
+            network_out = round(np.prod(np.array(feature_encoder.resolution)) / 2 ** (self.dims * (feature_encoder.num_resolutions - 1))) * feature_encoder_config["z_channels"]
+            classifier.append(feature_encoder)
+            classifier.append(torch.nn.Linear(network_out, num_feature_classes[key]))
+            self.classifiers[key] = classifier
+        
+        if ckpt_path is not None: self.init_from_ckpt(ckpt_path, ignore_keys, only_load_encoder)
+        
+    def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
+        sd = torch.load(path, map_location="cpu")
+        if "state_dict" in list(sd.keys()):
+            sd = sd["state_dict"]
+        keys = list(sd.keys())
+        for k in keys:
+            for ik in ignore_keys:
+                if k.startswith(ik):
+                    print("Deleting key {} from state_dict.".format(k))
+                    del sd[k]
+        missing, unexpected = self.load_state_dict(sd, strict=False) if not only_model else self.encoder.load_state_dict(
+            sd, strict=False)
+        print(f"Restored from {path} with {len(missing)} missing and {len(unexpected)} unexpected keys")
+        if len(missing) > 0:
+            print(f"Missing Keys: {missing}")
+        if len(unexpected) > 0:
+            print(f"Unexpected Keys: {unexpected}")
+        
+    @torch.no_grad()
+    def get_input(self, batch, k):
+        if isinstance(k, (str, int)):
+            x = batch[k]
+            if len(x.shape) != self.dims + 2:
+                x = x[:, None]
+            x = x.to(memory_format=torch.contiguous_format).float()
+            return x
+        elif isinstance(k, (list, tuple)):
+            xs = {}
+            for kk in k:
+                x = batch[kk]
+                xs[kk] = x.to(memory_format=torch.contiguous_format)
+            return xs
+    
+    @property
+    def dataset_connector(self):
+        return self.trainer._data_connector.trainer.datamodule.datasets["train"]
+
+    def shared_step(self, batch):
+        image = self.get_input(batch, self.data_key)
+        feature = self.get_input(batch, self.feature_key)
+        model_outputs = self.encoder(image)
+        
+        loss_all = 0.
+        loss_log = {}
+        log_prefix = "train" if self.training else "val"
+        for k, classifier in self.classifiers.items():
+            feat = feature[k]
+            is_valid = (feature[k][:, 0].sum() == 0) * 1.
+            preds = classifier[0](model_outputs)
+            preds = classifier[1](preds.view(image.shape[0], -1))
+            loss = torch.nn.functional.cross_entropy(preds, feat)
+            loss_all += loss * is_valid
+            loss_log[f"{log_prefix}/loss_{k}"] = loss.item() * is_valid
+            
+        self.log(f"{log_prefix}/loss", loss_all, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log('global_step', self.global_step, logger=False, on_epoch=False, prog_bar=True, on_step=True)
+        self.log_dict(loss_log, prog_bar=True, on_step=True, on_epoch=True, logger=True)
+        return loss_all
+    
+    def training_step(self, batch, batch_idx):
+        return self.shared_step(batch)
+    
+    @torch.no_grad()
+    def validation_step(self, batch, batch_idx):
+        return self.shared_step(batch)
+    
+    @torch.no_grad()
+    def log_images(self, batch, N=8, *args, **kwargs):
+        logs = {}
+        image = self.get_input(batch, self.data_key)
+        feature = self.get_input(batch, self.feature_key)
+        model_outputs = self.encoder(image)
+        
+        feat_log = {}
+        for k, classifier in self.classifiers.items():
+            preds = classifier[0](model_outputs)
+            preds = classifier[1](preds.view(image.shape[0], -1))
+            feat_log[k] = preds
+            
+        logs["inputs"] = image
+        logs["feature_gt"] = self.dataset_connector.rev_parse(feature)
+        logs["feature_pred"] = self.dataset_connector.rev_parse(feat_log)
+        return logs
+    
+    def configure_optimizers(self):
+        param = list(self.classifiers.parameters())
+        if self.training_encoder:
+            param += list(self.encoder.parameters())
+        optimizer = AdamW(param, lr=self.learning_rate)
+        return optimizer
+        

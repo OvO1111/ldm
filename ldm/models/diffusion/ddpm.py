@@ -1258,7 +1258,7 @@ class LatentDiffusion(DDPM):
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=4, sample=True, ddim_steps=200, ddim_eta=1., return_keys=None,
                    quantize_denoised=False, inpaint=False, plot_denoise_rows=False, plot_progressive_rows=False,
-                   plot_diffusion_rows=False, verbose=False, **kwargs):
+                   plot_diffusion_rows=False, verbose=False, plot_conditioned_samples=False, **kwargs):
 
         use_ddim = ddim_steps is not None
 
@@ -1319,6 +1319,9 @@ class LatentDiffusion(DDPM):
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row, cf)
                 log["denoise_row"] = denoise_grid
+            
+            if plot_conditioned_samples and self.model.conditioning_key == "concat":
+                log["conditioned_samples"] = torch.cat([log["samples"], log["conditioning"]], dim=1)
 
             if quantize_denoised and not isinstance(self.first_stage_model, AutoencoderKL) and not isinstance(
                     self.first_stage_model, IdentityFirstStage):

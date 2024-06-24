@@ -398,19 +398,21 @@ class VQModelInterface(VQModel):
         super().__init__(embed_dim=embed_dim, *args, **kwargs)
         self.embed_dim = embed_dim
 
-    def encode(self, x):
-        h = self.encoder(x)
+    def encode(self, x, c_cat=None):
+        cf = {f"c_{self.conditioning_key}": c_cat} if c_cat is not None else None
+        h = self.encoder(x, cf)
         h = self.quant_conv(h)
         return h
 
-    def decode(self, h, force_not_quantize=False):
+    def decode(self, h, c_cat=None, force_not_quantize=False):
         # also go through quantization layer
+        cf = {f"c_{self.conditioning_key}": c_cat} if c_cat is not None else None
         if not force_not_quantize:
             quant, emb_loss, info = self.quantize(h)
         else:
             quant = h
         quant = self.post_quant_conv(quant)
-        dec = self.decoder(quant)
+        dec = self.decoder(quant, cf)
         return dec
 
 

@@ -72,7 +72,9 @@ class BraTS2021_3D(Dataset):
         subject = self.transforms["normalize_mask"](subject)
         # random aug
         subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
-        subject = {k: v.data for k, v in subject.items()} | {"ids": idx, "mask": subject.fine.data if idx in self.fine_labeled_indices else subject.coarse.data, 'casename': self.split_keys[idx]}
+        subject = {k: v.data for k, v in subject.items()} | {"ids": idx, 
+                                                             "mask": subject.fine.data if idx in self.fine_labeled_indices else subject.coarse.data, 
+                                                             'casename': os.path.basename(self.split_keys[idx]).split('.')[0]}
 
         return subject
         

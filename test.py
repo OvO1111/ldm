@@ -18,7 +18,7 @@ from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.utilities.distributed import rank_zero_only
 
 from ldm.util import instantiate_from_config, get_obj_from_str
-from inference.utils import image_logger, TwoStreamBatchSampler, combine_mask_and_im
+from inference.utils import image_logger, TwoStreamBatchSampler, combine_mask_and_im, combine_mask_and_im_v2, visualize
 from main import get_parser, nondefault_trainer_args, worker_init_fn, WrappedDataset, DataLoader
 
 
@@ -85,8 +85,6 @@ class DataModuleFromConfig(pl.LightningDataModule):
 class ImageLogger(Callback):
     def __init__(self, test_batch_frequency=1, max_images=-1, clamp=False,
                  disabled=False, log_on_batch_idx=True, log_first_step=False, log_images_kwargs=None, logger={},
-                 # nifti logging
-                 log_original=False, log_original_keys=["samples_mixed", "mask_mixed"], 
                  # metrics logging
                  log_metrics=False, log_separate=False):
         super().__init__()
@@ -99,25 +97,21 @@ class ImageLogger(Callback):
         self.log_images_kwargs = log_images_kwargs if log_images_kwargs else {}
         self.log_first_step = log_first_step
         self.log_separate = log_separate
-        self.log_original_keys = log_original_keys
         
         def _get_logger(target, params):
             if target == "mask_rescale":
-                return lambda x: (x.long(), dict(params) | {"is_mask": True})
-            if target == "image_rescale":
-                return lambda x: ((x - x.min()) / (x.max() - x.min()), {})
+                return lambda x: visualize(x.long(), **params)
             if target == "image_and_mask":
-                return lambda x: (combine_mask_and_im(x, n=params.get("n_mask"), overlay_coef=params.get("overlay_coef", .2)), {})
+                return lambda x: combine_mask_and_im_v2(x, **params)
+            if target == "image_rescale" or True:
+                return lambda x: visualize((x - x.min()) / (x.max() - x.min()), **params)
         
-        self.log_original = log_original
-        if self.log_original: 
-            self.max_images = self.max_images * 2
         self.keep_queue = Queue(self.max_images)
         
         self.logger = {}
         self.log_metrics = log_metrics
         for name, val in logger.items():
-            self.logger[name] = _get_logger(val["target"], val.get("params"))
+            self.logger[name] = _get_logger(val["target"], val.get("params", {}))
             
     @staticmethod
     def _maybe_mkdir(path):
@@ -148,19 +142,6 @@ class ImageLogger(Callback):
         else:
             local_images = image_logger(images, path, n_grid_images=16, log_separate=False, **self.logger)
             self._enqueue_and_dequeue(path)
-        
-        if self.log_original:
-            self._maybe_mkdir(os.path.join(root, "h5"))
-            if len(self.log_original_keys) > 0:
-                bs = images[self.log_original_keys[0]].shape[0]
-                for mix_batch_idx in range(bs):
-                    filename = os.path.join(root, "h5", "b-{}_bs-{}.h5".format(batch_idx, mix_batch_idx))
-                    file = h5py.File(filename, "w")
-                    for k, _im in images.items():
-                        if isinstance(_im, torch.Tensor) and k in self.log_original_keys:
-                            file.create_dataset(k, data=_im[mix_batch_idx], compression='gzip')
-                    file.close()
-                    self._enqueue_and_dequeue(filename)
         return local_images
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):
@@ -183,7 +164,8 @@ class ImageLogger(Callback):
                     if self.clamp:
                         images[k] = torch.clamp(images[k], -1., 1.)
 
-            local_images = self.log_local(pl_module.logger.save_dir, split, images,
+            local_images = self.log_local(getattr(pl_module, "base", pl_module.logger.save_dir), 
+                                          split, images,
                                           pl_module.global_step, pl_module.current_epoch, batch_idx, metrics)
 
             # logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
