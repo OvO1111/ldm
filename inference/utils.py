@@ -166,7 +166,7 @@ def combine_mask_and_im_v2(x,
     b, h = colored_image.shape[:2]
     if h > num_images: colored_image = colored_image[:, ::h // num_images]
     colored_image = rearrange(colored_image, "b h w d c -> (b h) c w d")
-    colored_image = make_grid(torch.tensor(colored_image), nrow=min(num_images, h), normalize=False)
+    colored_image = make_grid(torch.tensor(colored_image), nrow=min(num_images, h), normalize=False, pad_value=255, padding=3)
     return colored_image.squeeze().data.cpu().numpy()
         
 
@@ -179,7 +179,7 @@ def visualize(image: torch.Tensor, n_mask: int=20, num_images=8, is_mask=False):
         if h > num_images: image = image[:, ::h // num_images]
         image = rearrange(image, "b h w d -> (b h) 1 w d")
     else: return image.squeeze().data.cpu().numpy()
-    image = make_grid(image, nrow=min(num_images, h), normalize=not is_mask, )
+    image = make_grid(image, nrow=min(num_images, h), normalize=not is_mask, pad_value=n_mask if is_mask else 1, padding=3)
 
     if is_mask:
         cmap = get_cmap("viridis")
@@ -292,13 +292,13 @@ class DistributedTwoStreamBatchSampler(DistributedSampler):
 
 
 class TwoStreamBatchSampler(Sampler):
-    def __init__(self, primary_indices, secondary_indices, batch_size, secondary_batch_size, iterator_on_primary_indices=False, **kwargs):
+    def __init__(self, primary_indices, secondary_indices, batch_size, secondary_batch_size, iterate_on_primary_indices=False, **kwargs):
         self.batch_size = batch_size
         self.primary_indices = primary_indices
         self.secondary_indices = secondary_indices
         self.secondary_batch_size = secondary_batch_size
         self.primary_batch_size = batch_size - secondary_batch_size
-        self.iterator_on_primary_indices = iterator_on_primary_indices
+        self.iterate_on_primary_indices = iterate_on_primary_indices
 
         assert len(self.primary_indices) >= self.primary_batch_size > 0,\
             f"condition {len(self.primary_indices)} >= {self.primary_batch_size} > 0 is not satisfied"
@@ -309,9 +309,10 @@ class TwoStreamBatchSampler(Sampler):
         #     f"condition {len(self.secondary_indices)} >= {self.secondary_batch_size} >= 0 is not satisfied"
 
     def __iter__(self):
-        primary_iter = iterate_eternally(self.primary_indices, len(self.secondary_indices) // len(self.primary_indices) if not self.iterator_on_primary_indices else 1)
+        # primary_iter = iterate_eternally(self.primary_indices, len(self.secondary_indices) // len(self.primary_indices) if not self.iterate_on_primary_indices else 1)
         if self.secondary_batch_size != 0:
-            secondary_iter = iterate_eternally(self.secondary_indices)
+            primary_iter = iterate_once(self.primary_indices) if self.iterate_on_primary_indices else iterate_eternally(self.primary_indices)
+            secondary_iter = iterate_eternally(self.secondary_indices) if not self.iterate_on_primary_indices else iterate_once(self.secondary_indices)
             return (
                 primary_batch + secondary_batch
                 for (primary_batch, secondary_batch)
@@ -319,10 +320,48 @@ class TwoStreamBatchSampler(Sampler):
                     grouper(secondary_iter, self.secondary_batch_size))
             )
         else:
+            primary_iter = iterate_once(self.primary_indices)
             return (primary_batch for primary_batch in grouper(primary_iter, self.primary_batch_size))
         
     def __len__(self):
-        if self.iterator_on_primary_indices: return len(self.primary_indices) // self.primary_batch_size
+        if self.iterate_on_primary_indices: return len(self.primary_indices) // self.primary_batch_size
+        return len(self.secondary_indices) // self.secondary_batch_size
+    
+    
+class DistributedTwoStreamBatchSampler(DistributedSampler):
+    def __init__(self, primary_indices, secondary_indices, batch_size, secondary_batch_size, iterate_on_primary_indices=False, **kwargs):
+        self.batch_size = batch_size
+        self.primary_indices = primary_indices
+        self.secondary_indices = secondary_indices
+        self.secondary_batch_size = secondary_batch_size
+        self.primary_batch_size = batch_size - secondary_batch_size
+        self.iterate_on_primary_indices = iterate_on_primary_indices
+
+        assert len(self.primary_indices) >= self.primary_batch_size > 0,\
+            f"condition {len(self.primary_indices)} >= {self.primary_batch_size} > 0 is not satisfied"
+        if len(self.secondary_indices) < self.secondary_batch_size:
+            self.secondary_indices = self.secondary_indices + self.primary_indices
+            print("using coarse labels extracted from fine labels as supervision")
+        # assert len(self.secondary_indices) >= self.secondary_batch_size >= 0,\
+        #     f"condition {len(self.secondary_indices)} >= {self.secondary_batch_size} >= 0 is not satisfied"
+
+    def __iter__(self):
+        # primary_iter = iterate_eternally(self.primary_indices, len(self.secondary_indices) // len(self.primary_indices) if not self.iterate_on_primary_indices else 1)
+        if self.secondary_batch_size != 0:
+            primary_iter = iterate_once(self.primary_indices) if self.iterate_on_primary_indices else iterate_eternally(self.primary_indices)
+            secondary_iter = iterate_eternally(self.secondary_indices) if not self.iterate_on_primary_indices else iterate_once(self.secondary_indices)
+            return (
+                primary_batch + secondary_batch
+                for (primary_batch, secondary_batch)
+                in zip(grouper(primary_iter, self.primary_batch_size),
+                    grouper(secondary_iter, self.secondary_batch_size))
+            )
+        else:
+            primary_iter = iterate_once(self.primary_indices)
+            return (primary_batch for primary_batch in grouper(primary_iter, self.primary_batch_size))
+        
+    def __len__(self):
+        if self.iterate_on_primary_indices: return len(self.primary_indices) // self.primary_batch_size 
         return len(self.secondary_indices) // self.secondary_batch_size
 
 
@@ -330,11 +369,9 @@ def iterate_once(iterable):
     return np.random.permutation(iterable)
 
 
-def iterate_eternally(indices, iterations=-1):
+def iterate_eternally(indices):
     def infinite_shuffles():
-        itr = 0
-        while itr < iterations or iterations < 0:
-            itr += 1
+        while True:
             yield np.random.permutation(indices)
     return itertools.chain.from_iterable(infinite_shuffles())
 

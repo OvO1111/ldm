@@ -36,7 +36,7 @@ class VectorQuantizer(nn.Module):
         self.embedding = nn.Embedding(self.n_e, self.e_dim)
         self.embedding.weight.data.uniform_(-1.0 / self.n_e, 1.0 / self.n_e)
 
-    def forward(self, z):
+    def forward(self, z, reduction='mean'):
         """
         Inputs the output of the encoder network z and maps it to a discrete
         one-hot vector that is the index of the closest embedding vector e_j
@@ -79,8 +79,10 @@ class VectorQuantizer(nn.Module):
         # ......\end......... (TODO)
 
         # compute loss for embedding
-        loss = torch.mean((z_q.detach()-z)**2) + self.beta * \
-            torch.mean((z_q - z.detach()) ** 2)
+        if reduction == 'mean':
+            loss = torch.mean((z_q.detach()-z)**2) + self.beta * torch.mean((z_q - z.detach()) ** 2)
+        elif reduction == 'none':
+            loss = (z_q.detach()-z)**2 + self.beta * (z_q - z.detach()) ** 2
 
         # preserve gradients
         z_q = z + (z_q - z).detach()
@@ -600,3 +602,19 @@ class IdentityFirstStage(torch.nn.Module):
 
     def forward(self, x, *args, **kwargs):
         return x
+    
+    
+class DoubleCodebookVQModel(VQModel):
+    def __init__(self, **kw):
+        n_embed = kw.get("n_embed", 2048)
+        embed_dim = kw.get("embed_dim", 8)
+        dims = kw.get("dims", 3)
+        self.foreground_quantize = VectorQuantizer(n_embed, embed_dim, beta=0.25, dims=dims)
+        
+    def encode(self, x, c_cat=None):
+        h = self.encoder(x, {f"c_{self.conditioning_key}": c_cat} if c_cat is not None else None)
+        h = self.quant_conv(h)
+        quant_b, emb_loss_b, info_b = self.quantize(h, reduction="none")
+        quant_f, emb_loss_f, info_f = self.foreground_quantize(h, reduction="none")
+        
+        return quant, emb_loss, info

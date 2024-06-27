@@ -68,7 +68,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
                 self.batch_sampler = sampler(primary_indices=self.datasets["test"].fine_labeled_indices, 
                                              secondary_indices=self.datasets["test"].coarse_labeled_indices,
                                              batch_size=self.batch_size,
-                                             secondary_batch_size=self.batch_size-primary_batch_size)
+                                             secondary_batch_size=self.batch_size-primary_batch_size, **self.batch_sampler["params"])
 
         # do not shuffle dataloader for iterable dataset
         shuffle = shuffle and not has_batch_sampler

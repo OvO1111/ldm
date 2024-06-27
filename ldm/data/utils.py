@@ -184,6 +184,18 @@ def load_or_write_split(basefolder, force=False, **splits):
     return splits
 
 
+class TorchioSequentialTransformer:
+    def __init__(self, d: MutableMapping, force_include=False):
+        self.transform_keys = d.keys()
+        self.transforms = d.values()
+        self.force_include = force_include
+        
+    def __call__(self, x: tio.Subject):
+        for k, tr in zip(self.transform_keys, self.transforms):
+            x = tr(x) if not self.force_include else tr(x, include=[k])
+        return x
+
+
 class TorchioBaseResizer(tio.transforms.Transform):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

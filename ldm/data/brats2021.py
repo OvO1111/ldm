@@ -54,7 +54,8 @@ class BraTS2021_3D(Dataset):
             
         for broken_file in [os.path.join(f"{base}/data", _) for _ in ["BraTS2021_00000.h5"]]: self.split_keys.remove(broken_file) if broken_file in self.split_keys else 0
         
-        self.fine_labeled_indices = list(range(n_fine if n_fine is not None else len(self.split_keys)))
+        use_fine_labeling = n_fine is not None and self.split == "train"
+        self.fine_labeled_indices = list(range(n_fine if use_fine_labeling else len(self.split_keys)))
         self.coarse_labeled_indices = [i for i in range(len(self.split_keys)) if i not in self.fine_labeled_indices]
 
     def __len__(self):
@@ -89,6 +90,42 @@ class BraTS2021_3D(Dataset):
                 
     def collate(self, batch):
         return _utils.collate.default_collate(batch)
+    
+
+class BraTS2021_DA(BraTS2021_3D):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.transforms["normalize_image"] = tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=None, include=["image", "raw"])
+        
+    def __getitem__(self, idx):
+        item = self.load_fn(self.split_keys[idx])
+        if "image" in item: 
+            image, fine = map(lambda x: item[x][:], ["image", "label"])
+            coarse = (fine > 0).astype(np.uint8)[None]
+            fine = fine[None]
+            
+            subject = tio.Subject(raw=tio.ScalarImage(tensor=image),
+                                  image=tio.ScalarImage(tensor=image), 
+                                  coarse=tio.ScalarImage(tensor=coarse), 
+                                  fine=tio.ScalarImage(tensor=fine),)
+        else: 
+            raw, image, coarse, fine = map(lambda x: item[x][:], ["samples", "mixed_samples", "mixed_coarse", "mixed_fine"])
+            subject = tio.Subject(raw=tio.ScalarImage(tensor=raw),
+                                  image=tio.ScalarImage(tensor=image), 
+                                  coarse=tio.ScalarImage(tensor=coarse), 
+                                  fine=tio.ScalarImage(tensor=fine),)
+        
+        # crop
+        subject = self.transforms["crop"](subject)
+        # normalize
+        subject = self.transforms["normalize_image"](subject)
+        # random aug
+        subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
+        subject = {k: v.data for k, v in subject.items()} | {"ids": idx, 
+                                                             "mask": subject.fine.data if idx in self.fine_labeled_indices else subject.coarse.data, 
+                                                             'casename': os.path.basename(self.split_keys[idx]).split('.')[0]}
+
+        return subject
 
 
 if __name__ == "__main__":

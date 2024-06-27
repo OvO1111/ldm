@@ -3,6 +3,7 @@ import json
 import h5py
 import torch
 import omegaconf
+import torch.distributed
 import torch.nn as nn
 import numpy as np
 import SimpleITK as sitk
@@ -10,12 +11,15 @@ import scipy.ndimage as ndm
 
 from enum import IntEnum
 from tqdm import tqdm
+from medpy.metric import binary
 from einops import rearrange, repeat
 from ldm.data.utils import load_or_write_split
 from ldm.util import instantiate_from_config
-from ldm.models.autoencoder import AutoencoderKL, VQModel
-from ldm.models.diffusion.ddpm import LatentDiffusion, Img2MaskDiffusion
+from ldm.models.autoencoder import AutoencoderKL
+from ldm.models.diffusion.ddpm import LatentDiffusion
 from ldm.models.diffusion.ccdm import CategoricalDiffusion, OneHotCategoricalBCHW
+from ldm.models.diffusion.classifier import CharacteristicClassifier
+from ldm.models.downstream.efficient_subclass import EfficientSubclassSegmentation
 
 from ldm.models.diffusion.ddim import make_ddim_timesteps
 from ldm.modules.diffusionmodules.util import extract_into_tensor
@@ -33,7 +37,7 @@ class MetricType(IntEnum):
     
     
 class ComputeMetrics:
-    def __init__(self, eval_scheme):
+    def __init__(self, eval_scheme, fvd_config=None):
         self.eval_scheme = eval_scheme
         if MetricType.lpips in self.eval_scheme:
             from ldm.modules.losses.lpips import LPIPS
@@ -47,7 +51,7 @@ class ComputeMetrics:
             self.psnr = PeakSignalNoiseRatio()
         if MetricType.fvd in self.eval_scheme:
             from torchmetrics.image.fid import FrechetInceptionDistance
-            self.fvd_module: nn.Module = instantiate_from_config(diffusion_kwargs.get("fvd_config"))
+            self.fvd_module: nn.Module = instantiate_from_config(fvd_config)
             self.fvd = FrechetInceptionDistance(feature=self.fvd_module, normalize=True)
     
     @torch.no_grad()
@@ -172,22 +176,24 @@ class MakeDataset:
                     assert im.ndim == self.dims + 1, f"desired ndim {self.dims} and actual ndim {im.shape} not match"
                     sitk.WriteImage(sitk.GetImageFromArray(rearrange(self.postprocess(im), "c ... -> ... c")), f)
                     self.dataset[sample_name_b][key] = f
-                if isinstance(value_b, str):
+                else:
                     self.dataset[sample_name_b][key] = value_b
                     
     def postprocess(self, sample):
         # c h w d
         return sample
         
-    def finalize(self):
-        dataset = {}
-        dataset["data"] = self.dataset
+    def finalize(self, dt=None, **kw):
+        dataset = {} | kw
+        collect_dt = self.dataset if dt is None else dt
+        dataset["data"] = collect_dt
         dataset["desc"] = self.desc
         dataset["keys"] = omegaconf.OmegaConf.to_container(self.include_keys)
-        dataset["length"] = len(self.dataset)
+        dataset["length"] = len(collect_dt)
+        dataset["format"] = {k: self.suffixes.get(k, "raw") for k, v in self.suffixes.items()}
         
         if self.create_split:
-            keys = list(self.dataset.keys())
+            keys = list(collect_dt.keys())
             load_or_write_split(self.base, force=True, 
                                 train=keys[:round(len(keys)*.7)],
                                 val=keys[round(len(keys)*.7):round(len(keys)*.8)],
@@ -226,10 +232,18 @@ class InferAutoencoderKL(AutoencoderKL, ComputeMetrics):
         return {}, logs
         
     
-class InferLatentDiffusion(LatentDiffusion, ComputeMetrics):
+class InferLatentDiffusion(LatentDiffusion, ComputeMetrics, MakeDataset):
     def __init__(self, 
                  eval_scheme=[1],
+                 save_dataset=False,
+                 save_dataset_path=None,
+                 include_keys=["data", "text"],
+                 suffix_keys={"data":".nii.gz",},
                  **diffusion_kwargs):
+        if save_dataset:
+            self.save_dataset = save_dataset
+            assert exists(save_dataset_path)
+            MakeDataset.__init__(self, save_dataset_path, include_keys, suffix_keys)
         LatentDiffusion.__init__(self, **diffusion_kwargs)
         ComputeMetrics.__init__(self, eval_scheme)
         self.eval()
@@ -250,6 +264,9 @@ class InferLatentDiffusion(LatentDiffusion, ComputeMetrics):
         
         x = logs["inputs"]
         x_samples = logs["samples"]
+        if self.save_dataset:
+            self.add(logs, batch.get("casename"), dtypes={"image": np.uint8})
+            
         if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
             metrics = self.log_eval(x_samples, x, log_group_metrics_in_2d)
             # print(metrics)
@@ -269,8 +286,8 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
                  **diffusion_kwargs):
         CategoricalDiffusion.__init__(self, **diffusion_kwargs)
         ComputeMetrics.__init__(self, eval_scheme)
+        self.save_dataset = save_dataset
         if save_dataset:
-            self.save_dataset = save_dataset
             assert exists(save_dataset_path)
             MakeDataset.__init__(self, save_dataset_path, include_keys, suffix_keys)
         self.eval()
@@ -283,7 +300,8 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
     
     def on_test_end(self, *args):
         if self.save_dataset:
-            self.finalize()
+            datasets = torch.distributed.gather_object(self.dataset)
+        self.finalize(datasets)
         
     @torch.no_grad()
     def test_step(self, batch, batch_idx):
@@ -365,7 +383,7 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
                     
                     # eps = self.get_noise(torch.zeros_like(q_xT))
                     
-                    eps = (p_xt - p_x0_given_xt * cumalphas_t) / (1 - cumalphas_t)
+                    eps = OneHotCategoricalBCHW(logits=(p_xt - p_x0_given_xt * cumalphas_t) / (1 - cumalphas_t)).sample()
                     p_xt = torch.clamp(self.q_xtm1_given_x0_xt(p_xt, p_x0_given_xt, t_, eps), min=1e-12)
                 
                 if plot_denoising_rows and t % plot_diffusion_every_t == 0: denoising_rows.append(p_x0_given_xt)
@@ -462,6 +480,7 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
         return {}, logs
     
     def postprocess(self, sample):
+        # n h w d
         all_labels = np.unique(sample).flatten()
         for i in all_labels:
             labeled_sample, _ = ndm.label(sample[0] == i)
@@ -478,22 +497,14 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
         return sample.astype(np.uint8)
         
 
-class InferMixedDiffusion(InferLatentDiffusion, MakeDataset):
+class InferMixedDiffusion(InferLatentDiffusion):
     def __init__(self, 
                  mix_scheme="latent", 
-                 save_dataset=False,
-                 save_dataset_path=None,
-                 include_keys=["data", "text"],
-                 suffix_keys={"data":".nii.gz",},
                  **diffusion_kwargs):
         self.mix_scheme = mix_scheme
-        if save_dataset:
-            self.save_dataset = save_dataset
-            assert exists(save_dataset_path)
-            MakeDataset.__init__(self, save_dataset_path, include_keys, suffix_keys)
         super().__init__(**diffusion_kwargs)
         
-    def add(self, samples, sample_names=None, dtypes={}):
+    def add(self, samples, sample_names=None, dtypes={}, b_mapping={}):
         if not exists(sample_names): sample_names = [f"case_{len(self.dataset) + i}" for i in range(self.bs)]
         if isinstance(sample_names, str): sample_names = [sample_names]
         for i in range(len(sample_names)): 
@@ -501,11 +512,12 @@ class InferMixedDiffusion(InferLatentDiffusion, MakeDataset):
         B = samples[self.include_keys[0]].shape[0]
         
         for b in range(B):
-            sample_name_b = sample_names[b]
+            sample_name_b = 'syn' + sample_names[b]
             f = os.path.join(self.base, "data", sample_name_b + ".h5")
             h5 = h5py.File(f, "w")
             for key in self.include_keys:
-                value_b = samples[key][b]
+                b_ = b_mapping[sample_names[b]].get(key, b_mapping[sample_names[b]]["others"])
+                value_b = samples[key][b_]
                 if isinstance(value_b, torch.Tensor):
                     im = value_b.cpu().data.numpy().astype(dtypes.get(key, np.float32))
                     h5.create_dataset(key, data=self.postprocess(im), compression="gzip")
@@ -530,6 +542,9 @@ class InferMixedDiffusion(InferLatentDiffusion, MakeDataset):
                 else: cropped.append([slice(0, t.shape[i] + 1) for i in range(len(t.shape))])
         return cropped
     
+    def on_test_end(self,):
+        return
+    
     @staticmethod
     def _interpolate(tensor, *args, **kwargs):
         mode = kwargs.get("mode", "nearest")
@@ -539,7 +554,7 @@ class InferMixedDiffusion(InferLatentDiffusion, MakeDataset):
         return nn.functional.interpolate(tensor, *args, **kwargs)
     
     @torch.no_grad()
-    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, alpha=.5, *args, **kwargs):
+    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, alpha=.2, *args, **kwargs):
         # alpha is the mixup ratio, mix=alpha*sample+(1-alpha)*gt lower -> more fine gt ; higher -> more generated
         logs = dict()
         z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key,
@@ -563,6 +578,7 @@ class InferMixedDiffusion(InferLatentDiffusion, MakeDataset):
             samples, _ = self.sample_log(cond=c, batch_size=B, ddim=use_ddim, ddim_steps=ddim_steps, eta=eta)
             logs["samples"] = self.decode_first_stage(samples, cf)
             primary_batch_size = self.trainer.datamodule.batch_sampler.primary_batch_size
+            print(f"mixing {batch['casename'][:primary_batch_size]} ({1-alpha:.2f}*gt) with {batch['casename'][primary_batch_size:]} ({alpha:.2f}*samples)")
             
             if self.mix_scheme == "latent":
                 z_fines = z[:primary_batch_size]
@@ -648,8 +664,9 @@ class InferMixedDiffusion(InferLatentDiffusion, MakeDataset):
                 
                 i_mix, mask_mix = torch.cat(i_mix, dim=0), torch.cat(mask_mix, dim=0)
                 z_mix = self.encode_first_stage(i_mix, cf[primary_batch_size:])
-                z_mix = self.p_sample_loop(cond=c[primary_batch_size:], shape=z_mix.shape, x_T=z_mix, timesteps=100, verbose=True)
+                z_mix = self.p_sample_loop(cond=c[primary_batch_size:], shape=z_mix.shape, x_T=z_mix, timesteps=100, verbose=False)
                 i_mix = self.decode_first_stage(z_mix, cf[primary_batch_size:])
+                logs["samples"] = logs["samples"][:primary_batch_size]
                 logs["mixed_samples"] = i_mix
                 logs["mixed_fine"] = mask_mix
                 logs["mixed_coarse"] = ((mask_mix > 0) | (cx[primary_batch_size:] > 0)).float()
@@ -660,7 +677,14 @@ class InferMixedDiffusion(InferLatentDiffusion, MakeDataset):
         x_samples = logs["samples"]
         
         if self.save_dataset:
-            self.add(logs, batch.get("casename"), dtypes={"mixed_fine": np.uint8, "mixed_coarse": np.uint8})
+            primary_casename = batch.get("casename")[:primary_batch_size]
+            secondary_casename = batch.get("casename")[primary_batch_size:]
+            casenames = ['+'.join([p, s]) for p in primary_casename for s in secondary_casename]
+            mapping = {'+'.join([p, s]): {"samples": ip, "others": iis} for ip, p in enumerate(primary_casename) for iis, s in enumerate(secondary_casename)}
+            self.add(logs, 
+                     casenames, 
+                     dtypes={"mixed_fine": np.uint8, "mixed_coarse": np.uint8},
+                     b_mapping=mapping)
         
         if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
             metrics = self.log_eval(x_samples, x, log_group_metrics_in_2d)
@@ -669,3 +693,89 @@ class InferMixedDiffusion(InferLatentDiffusion, MakeDataset):
             return metrics, logs
         
         return None, logs
+
+
+class InferSubclassSegmentation(EfficientSubclassSegmentation, MakeDataset):
+    def __init__(self, 
+                 save_dataset=False,
+                 save_dataset_path=None,
+                 include_keys=["metrics"],
+                 suffix_keys={},
+                 **kw):
+        if save_dataset:
+            self.save_dataset = save_dataset
+            assert exists(save_dataset_path)
+            MakeDataset.__init__(self, save_dataset_path, include_keys, suffix_keys)
+        EfficientSubclassSegmentation.__init__(self, **kw)
+        self.eval()
+        
+    @torch.no_grad()
+    def test_step(self, batch, batch_idx):
+        pass
+    
+    def on_test_end(self,):
+        if self.save_dataset:
+            datasets = torch.distributed.gather_object(self.dataset)
+        mean_mt = {f"test_mean/{fn}/{c}": np.mean([d["metrics"][f"test/{fn}/{c}"] for d in datasets.values()]) for fn in ["dc", "precision", "recall"] for c in range(1, self.n_fine)}
+        mean_mt = mean_mt | {f"test_mean/{fn}": np.mean([mean_mt[f"test_mean/{fn}/{c}"] for c in range(1, self.n_fine)]) for fn in ["dc", "precision", "recall"]}
+        self.finalize(datasets, mean_metrics=mean_mt)
+    
+    @torch.no_grad()
+    def log_images(self, batch, *args, **kwargs):
+        logs = super().log_images(batch, *args, **kwargs)
+        logs["metrics"] = self._multiclass_metrics(logs["seg_fine"].cpu().numpy(), logs["gt_fine"].cpu().numpy(), "test")
+        
+        if self.save_dataset:
+            self.add(logs, batch.get("casename"), dtypes={"image": np.uint8})
+
+        return logs["metrics"], logs
+
+
+class InferCharacteristicClassifier(CharacteristicClassifier, MakeDataset):
+    def __init__(self, 
+                 save_dataset=False,
+                 save_dataset_path=None,
+                 include_keys=["metrics"],
+                 suffix_keys={},
+                 **kw):
+        if save_dataset:
+            self.save_dataset = save_dataset
+            assert exists(save_dataset_path)
+            MakeDataset.__init__(self, save_dataset_path, include_keys, suffix_keys)
+        CharacteristicClassifier.__init__(self, **kw)
+        self.eval()
+        
+    @torch.no_grad()
+    def test_step(self, batch, batch_idx):
+        pass
+    
+    def on_test_end(self,):
+        if self.save_dataset:
+            datasets = torch.distributed.gather_object(self.dataset)
+        mean_mt = {f"test_mean/{fn}/{c}": np.mean([d["metrics"][f"test/{fn}/{c}"] for d in datasets.values()]) for fn in ["dc", "precision", "recall"] for c in range(1, self.n_fine)}
+        mean_mt = mean_mt | {f"test_mean/{fn}": np.mean([mean_mt[f"test_mean/{fn}/{c}"] for c in range(1, self.n_fine)]) for fn in ["dc", "precision", "recall"]}
+        self.finalize(datasets, mean_metrics=mean_mt)
+    
+    @torch.no_grad()
+    def log_images(self, batch, *args, **kwargs):
+        logs = {}
+        image = self.get_input(batch, self.data_key)
+        feature = self.get_input(batch, self.feature_key)
+        model_outputs = self.encoder(image)
+        
+        feat_log = {}
+        for k, classifier in self.classifiers.items():
+            preds = classifier[0](model_outputs)
+            preds = classifier[1](preds.view(image.shape[0], -1))
+            feat_log[k] = preds
+            
+        logs["inputs"] = image
+        logs["feature_gt"] = self.dataset_connector.rev_parse(feature)
+        logs["feature_pred"] = self.dataset_connector.rev_parse(feat_log)
+        logs["feature_gt_onehot"] = {fk: feature[fk].argmax(1) for fk in self.classifiers.keys()}
+        logs["feature_pred_onehot"] = {fk: feat_log.argmax(1) for fk in self.classifiers.keys()}
+        
+        if self.save_dataset:
+            self.add(logs, batch.get("casename"), dtypes={})
+
+        return logs["metrics"], logs

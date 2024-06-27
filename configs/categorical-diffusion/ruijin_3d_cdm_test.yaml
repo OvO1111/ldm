@@ -16,7 +16,7 @@ model:
     class_weights: [1,1,1,1,1,1,1,1,1,1,1,1]
     # use or not use legacy from ccdm.git
     # use_legacy: true
-    # parameterization: kl
+    # parameterization: kl , 
     # ckpt_path: /ailab/user/dailinrui/data/ccdm/ruijin_ccdm_64_128_128_baseline/checkpoint/checkpoint_ep64_gs168155.ckpt
     use_legacy: false
     parameterization: x0

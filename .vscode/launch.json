@@ -49,7 +49,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./test.py",
-            "args": ["-b", "./configs/categorical-diffusion/ruijin_3d_cdm_test.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
+            "args": ["-b", "./configs/categorical-diffusion/ensemble_cdm_test.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {
@@ -60,13 +60,13 @@
             "args": ["-b", "./configs/classifier/ensemble_classifier.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
-        // {
-        //     "name": "debug current file",
-        //     "type": "debugpy",
-        //     "request": "launch",
-        //     "program": "${file}",
-        //     "args": [],
-        //     "console": "integratedTerminal"
-        // },
+        {
+            "name": "debug downstream",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./main.py",
+            "args": ["-b", "./configs/downstream/brats_subclass.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug", "--scale_lr", "0"],
+            "console": "integratedTerminal"
+        },
     ]
 }

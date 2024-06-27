@@ -236,15 +236,17 @@ def make_attn(in_channels, attn_type="vanilla", dims=3):
 class Model(nn.Module):
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels,
-                 resolution, use_timestep=True, use_linear_attn=False, attn_type="vanilla"):
+                 resolution, use_timestep=True, use_linear_attn=False, attn_type="vanilla", dims=3):
         super().__init__()
         if use_linear_attn: attn_type = "linear"
         self.ch = ch
+        self.out_ch = out_ch
         self.temb_ch = self.ch*4
         self.num_resolutions = len(ch_mult)
         self.num_res_blocks = num_res_blocks
         self.resolution = resolution
         self.in_channels = in_channels
+        self.conv_nd = getattr(nn, f"Conv{dims}d", nn.Identity)
 
         self.use_timestep = use_timestep
         if self.use_timestep:
@@ -258,11 +260,11 @@ class Model(nn.Module):
             ])
 
         # downsampling
-        self.conv_in = torch.nn.Conv2d(in_channels,
-                                       self.ch,
-                                       kernel_size=3,
-                                       stride=1,
-                                       padding=1)
+        self.conv_in = self.conv_nd(in_channels,
+                                    self.ch,
+                                    kernel_size=3,
+                                    stride=1,
+                                    padding=1)
 
         curr_res = resolution
         in_ch_mult = (1,)+tuple(ch_mult)
@@ -276,7 +278,7 @@ class Model(nn.Module):
                 block.append(ResnetBlock(in_channels=block_in,
                                          out_channels=block_out,
                                          temb_channels=self.temb_ch,
-                                         dropout=dropout))
+                                         dropout=dropout, dims=dims))
                 block_in = block_out
                 if curr_res in attn_resolutions:
                     attn.append(make_attn(block_in, attn_type=attn_type))
@@ -293,12 +295,12 @@ class Model(nn.Module):
         self.mid.block_1 = ResnetBlock(in_channels=block_in,
                                        out_channels=block_in,
                                        temb_channels=self.temb_ch,
-                                       dropout=dropout)
+                                       dropout=dropout, dims=dims)
         self.mid.attn_1 = make_attn(block_in, attn_type=attn_type)
         self.mid.block_2 = ResnetBlock(in_channels=block_in,
                                        out_channels=block_in,
                                        temb_channels=self.temb_ch,
-                                       dropout=dropout)
+                                       dropout=dropout, dims=dims)
 
         # upsampling
         self.up = nn.ModuleList()
@@ -313,7 +315,7 @@ class Model(nn.Module):
                 block.append(ResnetBlock(in_channels=block_in+skip_in,
                                          out_channels=block_out,
                                          temb_channels=self.temb_ch,
-                                         dropout=dropout))
+                                         dropout=dropout, dims=dims))
                 block_in = block_out
                 if curr_res in attn_resolutions:
                     attn.append(make_attn(block_in, attn_type=attn_type))
@@ -327,11 +329,11 @@ class Model(nn.Module):
 
         # end
         self.norm_out = Normalize(block_in)
-        self.conv_out = torch.nn.Conv2d(block_in,
-                                        out_ch,
-                                        kernel_size=3,
-                                        stride=1,
-                                        padding=1)
+        self.conv_out = self.conv_nd(block_in,
+                                     out_ch,
+                                     kernel_size=3,
+                                     stride=1,
+                                     padding=1)
 
     def forward(self, x, t=None, context=None):
         #assert x.shape[2] == x.shape[3] == self.resolution

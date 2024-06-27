@@ -22,7 +22,7 @@ from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.data.base import Txt2ImgIterableBaseDataset
 from ldm.util import instantiate_from_config, get_obj_from_str
-from inference.utils import TwoStreamBatchSampler, image_logger, visualize, combine_mask_and_im, combine_mask_and_im_v2
+from inference.utils import TwoStreamBatchSampler, DistributedTwoStreamBatchSampler, image_logger, visualize, combine_mask_and_im_v2
 
 
 def default(x, defval=None):
@@ -168,9 +168,9 @@ def worker_init_fn(_):
 
 
 class DataModuleFromConfig(pl.LightningDataModule):
-    def __init__(self, batch_size, train=None, validation=None, test=None, predict=None,
-                 wrap=False, num_workers=None, shuffle_test_loader=False, use_worker_init_fn=False,
-                 shuffle_val_dataloader=False, train_sampler=None):
+    def __init__(self, batch_size, train=None, validation=None,
+                 wrap=False, num_workers=None, use_worker_init_fn=False,
+                 shuffle_val_dataloader=False, batch_sampler=None):
         super().__init__()
         self.batch_size = batch_size
         self.dataset_configs = dict()
@@ -182,14 +182,9 @@ class DataModuleFromConfig(pl.LightningDataModule):
         if validation is not None:
             self.dataset_configs["validation"] = validation
             self.val_dataloader = partial(self._val_dataloader, shuffle=shuffle_val_dataloader)
-        if test is not None:
-            self.dataset_configs["test"] = test
-            self.test_dataloader = partial(self._test_dataloader, shuffle=shuffle_test_loader)
-        if predict is not None:
-            self.dataset_configs["predict"] = predict
-            self.predict_dataloader = self._predict_dataloader
         self.wrap = wrap
-        self.train_sampler = train_sampler
+        self.has_batch_sampler = batch_sampler is not None
+        self.batch_sampler_config = batch_sampler
 
     def prepare_data(self):
         for data_cfg in self.dataset_configs.values():
@@ -202,31 +197,40 @@ class DataModuleFromConfig(pl.LightningDataModule):
         if self.wrap:
             for k in self.datasets:
                 self.datasets[k] = WrappedDataset(self.datasets[k])
-
-    def _train_dataloader(self):
-        has_batch_sampler = False
-        if self.train_sampler is not None:
-            sampler = get_obj_from_str(self.train_sampler["target"])
-            if sampler == TwoStreamBatchSampler:
-                has_batch_sampler = True
-                self.train_sampler = sampler(primary_indices=self.datasets["train"].fine_labeled_indices, 
-                                            secondary_indices=self.datasets["train"].coarse_labeled_indices,
-                                            batch_size=self.batch_size,
-                                            secondary_batch_size=self.batch_size-1)
+        if self.has_batch_sampler: self._get_batch_sampler(self.batch_sampler_config, self.datasets["train"])
                 
+    def _get_batch_sampler(self, batch_sampler, dataset):
+        sampler = get_obj_from_str(batch_sampler["target"])
+        if sampler == TwoStreamBatchSampler or sampler == DistributedTwoStreamBatchSampler:
+            try:
+                primary_batch_size = batch_sampler["params"].get("primary_batch_size", 1)
+            except Exception: primary_batch_size = 1
+            self.batch_sampler = sampler(primary_indices=dataset.fine_labeled_indices, 
+                                         secondary_indices=dataset.coarse_labeled_indices,
+                                         batch_size=self.batch_size,
+                                         secondary_batch_size=self.batch_size-primary_batch_size, **batch_sampler["params"])
+        else:
+            raise NotImplementedError()
+
+    def _train_dataloader(self):                
         is_iterable_dataset = isinstance(self.datasets['train'], Txt2ImgIterableBaseDataset)
         if is_iterable_dataset or self.use_worker_init_fn:
             init_fn = worker_init_fn
         else:
             init_fn = None
-        train_dataloader = partial(DataLoader, 
-                                   dataset=self.datasets["train"],
-                                   num_workers=self.num_workers,
-                                   worker_init_fn=init_fn,
-                                   shuffle=False if is_iterable_dataset or has_batch_sampler else True,
-                                   collate_fn=getattr(self.datasets["train"], "collate", _utils.collate.default_collate),)
-        if not has_batch_sampler: return train_dataloader(batch_size=self.batch_size)
-        else: return train_dataloader(batch_sampler=self.train_sampler)
+        if not self.has_batch_sampler:
+            return DataLoader(self.datasets["train"],
+                              batch_size=self.batch_size,
+                              num_workers=self.num_workers,
+                              worker_init_fn=init_fn,
+                              shuffle=True if not is_iterable_dataset else False, 
+                              collate_fn=getattr(self.datasets["train"], "collate", _utils.collate.default_collate))
+        else:
+            return DataLoader(self.datasets["train"],
+                              batch_sampler=self.batch_sampler,
+                              num_workers=self.num_workers,
+                              worker_init_fn=init_fn,
+                              collate_fn=getattr(self.datasets["train"], "collate", _utils.collate.default_collate))
 
     def _val_dataloader(self, shuffle=False, batch_size=None):
         if isinstance(self.datasets['validation'], Txt2ImgIterableBaseDataset) or self.use_worker_init_fn:
@@ -234,32 +238,11 @@ class DataModuleFromConfig(pl.LightningDataModule):
         else:
             init_fn = None
         return DataLoader(self.datasets["validation"],
-                          batch_size=self.batch_size if batch_size is None else batch_size,
-                          num_workers=self.num_workers,
-                          worker_init_fn=init_fn,
-                          shuffle=shuffle, 
-                          collate_fn=getattr(self.datasets["validation"], "collate", _utils.collate.default_collate))
-
-    def _test_dataloader(self, shuffle=False):
-        is_iterable_dataset = isinstance(self.datasets['test'], Txt2ImgIterableBaseDataset)
-        if is_iterable_dataset or self.use_worker_init_fn:
-            init_fn = worker_init_fn
-        else:
-            init_fn = None
-
-        # do not shuffle dataloader for iterable dataset
-        shuffle = shuffle and (not is_iterable_dataset)
-
-        return DataLoader(self.datasets["test"], batch_size=self.batch_size,
-                          num_workers=self.num_workers, worker_init_fn=init_fn, shuffle=shuffle)
-
-    def _predict_dataloader(self, shuffle=False):
-        if isinstance(self.datasets['predict'], Txt2ImgIterableBaseDataset) or self.use_worker_init_fn:
-            init_fn = worker_init_fn
-        else:
-            init_fn = None
-        return DataLoader(self.datasets["predict"], batch_size=self.batch_size,
-                          num_workers=self.num_workers, worker_init_fn=init_fn)
+                            batch_size=self.batch_size if batch_size is None else batch_size,
+                            num_workers=self.num_workers,
+                            worker_init_fn=init_fn,
+                            shuffle=shuffle, 
+                            collate_fn=getattr(self.datasets["validation"], "collate", _utils.collate.default_collate))
 
 
 class SetupCallback(Callback):
@@ -618,10 +601,10 @@ if __name__ == "__main__":
             "wandb": {
                 "target": "pytorch_lightning.loggers.WandbLogger",
                 "params": {
-                    "name": nowname,
+                    "name": nowname.replace("/", "_"),
                     "save_dir": logdir,
                     "offline": opt.debug,
-                    "id": nowname,
+                    "id": nowname.replace("/", "_"),
                 }
             },
             "tensorboard": {

@@ -26,11 +26,11 @@ model:
     # whether use legacy
     use_legacy: true
     parameterization: kl 
-    ckpt_path: /ailab/user/dailinrui/data/ccdm/ruijin_ensemble_64_128_128_baseline/checkpoint/checkpoint_ep50_gs148818.ckpt
+    ckpt_path: /ailab/user/dailinrui/data/ccdm/ensemble_128_128_128_baseline/checkpoint/checkpoint_ep150_gs440618.ckpt
 
     # make dataset
     save_dataset: true 
-    save_dataset_path: /ailab/user/dailinrui/data/ccdm/ruijin_ensemble_64_128_128_baseline/dataset
+    save_dataset_path: /ailab/user/dailinrui/data/ccdm/ensemble_128_128_128_baseline/dataset
     include_keys: [image, text]
     suffix_keys: 
       image: .nii.gz
@@ -73,7 +73,7 @@ data:
     test:
       target: ldm.data.ensemble.EnsembleDataset
       params:
-        use_dataset_name: [liver]
+        use_dataset_name: [ruijin, pancreas, liver]
         split: train
         resize_to: [128, 128, 128]
         max_size: 50

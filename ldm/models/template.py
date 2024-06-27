@@ -18,15 +18,8 @@ from ldm.util import log_txt_as_img, default, ismap, instantiate_from_config
 
 
 class BasePytorchLightningTrainer(pl.LightningModule):
-    def __init__(self, 
-                 model_config,
-                 ignore_keys=[],
-                 only_model=False,
-                 ckpt_path=None):
-        self.model_config = model_config
+    def __init__(self,):
         super().__init__()
-        self.model = instantiate_from_config(model_config)
-        self.init_from_ckpt(ckpt_path, ignore_keys, only_model)
         
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
         sd = torch.load(path, map_location="cpu")
@@ -48,21 +41,25 @@ class BasePytorchLightningTrainer(pl.LightningModule):
         
     @torch.no_grad()
     def get_input(self, batch, k):
-        raise NotImplementedError()
+        return batch.get(k)
     
     @property
     def dataset_connector(self):
-        return self.trainer._data_connector.trainer.datamodule.datasets["train"]
+        return self.trainer._data_connector.trainer.datamodule.datasets
 
     def shared_step(self, batch):
         raise NotImplementedError()
     
     def training_step(self, batch, batch_idx):
-        return self.shared_step(batch)
+        loss, loss_dict = self.shared_step(batch)
+        if loss_dict is not None: self.log_dict(loss_dict, prog_bar=True, on_step=True, on_epoch=True, logger=True)
+        self.log("global_step", self.global_step, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+        return loss
     
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
-        return self.shared_step(batch)
+        loss, loss_dict = self.shared_step(batch)
+        if loss_dict is not None: self.log_dict(loss_dict, prog_bar=True, on_step=True, on_epoch=True, logger=True)
     
     @torch.no_grad()
     def log_images(self, batch, N=8, *args, **kwargs):
