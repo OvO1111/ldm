@@ -10,12 +10,14 @@ model:
     first_stage_key: image
     cond_stage_key: mask
     conditioning_key: concat
-    image_size: [32, 32, 32]  # after first-stage encoding
+    image_size: [16, 16, 16]  # after first-stage encoding
     channels: 4  # after first-stage encoding
     monitor: val/loss_simple_ema
     cond_stage_trainable: false
-    mix_scheme: direct
-    ckpt_path: /ailab/user/dailinrui/data/ldm/brats21_ldm_cvq_128_128_128/checkpoints/epoch=000522.ckpt
+    # mix_scheme: latent
+    # ckpt_path: /ailab/user/dailinrui/data/ldm/brats21_ldm_cvq_128_128_128/checkpoints/epoch=000921.ckpt
+    mix_scheme: vq
+    ckpt_path: /ailab/user/dailinrui/data/ldm/brats21fg_cvq_64_64_64/checkpoints/last.ckpt
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
@@ -77,7 +79,7 @@ model:
 
     save_dataset: true 
     save_dataset_path: /ailab/user/dailinrui/data/ldm/brats21_ldm_cvq_128_128_128/dataset
-    include_keys: [samples, mixed_samples, mixed_fine, mixed_coarse, alpha]
+    include_keys: [image, label, premix, premix_label, mixed_samples, mixed_fine]
     suffix_keys: 
       data: .h5
 
@@ -86,8 +88,8 @@ model:
 data:
   target: test.DataModuleFromConfig
   params:
-    batch_size: 4
-    num_workers: 4
+    batch_size: 2
+    num_workers: 2
     wrap: False
     batch_sampler: 
       target: 
@@ -96,11 +98,16 @@ data:
         primary_batch_size: 1
         iterate_on_primary_indices: false 
     test:
-      target: ldm.data.brats2021.BraTS2021_3D
+      # target: ldm.data.brats2021.BraTS2021_3D
+      # params:
+      #   n_fine: 10
+      #   split: train
+      #   crop_to: [128, 128, 128]
+      target: ldm.data.brats2021.BraTS2021_3DFG
       params:
         n_fine: 10
         split: train
-        crop_to: [128, 128, 128]
+        crop_to: [64, 64, 64]
 
 lightning:
   callbacks:

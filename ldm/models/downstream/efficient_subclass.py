@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import math
 import random
-import pytorch_lightning as pl
 from einops import rearrange
 from functools import reduce, partial
 from ldm.util import instantiate_from_config
@@ -154,7 +154,7 @@ class EfficientSubclassSegmentation(BasePytorchLightningTrainer):
     def on_pretrain_routine_start(self):
         if hasattr(self.trainer.datamodule, "batch_sampler"):
             self.primary_batch_size = self.trainer.datamodule.batch_sampler.primary_batch_size
-        else: self.primary_batch_size = self.trainer.datamodule.batch_size
+        else: self.primary_batch_size = 0
         
     @staticmethod
     def _get_foreground_bbox(tensor, use_shape_on_background=False):
@@ -171,7 +171,7 @@ class EfficientSubclassSegmentation(BasePytorchLightningTrainer):
                                 slice(crop_z[0], crop_z[1] + 1)])
             else:
                 if use_shape_on_background: cropped.append(None)
-                else: cropped.append([slice(0, t.shape[i] + 1) for i in range(len(t.shape))])
+                else: cropped.append([slice(it, it+1)] + [slice(0, t.shape[i] + 1) for i in range(1, len(t.shape))])
         return cropped
     
     @staticmethod
@@ -191,7 +191,7 @@ class EfficientSubclassSegmentation(BasePytorchLightningTrainer):
         im_mix, mask_mix = [], []
         # crop foreground region
         im_fine_masked_cropped = self._get_foreground_bbox(mixup_lf1)
-        im_coarse_masked_cropped = self._get_foreground_bbox(mixup_lc2, use_shape_on_background=True)
+        im_coarse_masked_cropped = self._get_foreground_bbox(mixup_lc2)
         # resize fine foregrounds to coarse's size
         im_fine_reshaped, mask_fine_reshaped = [], []
         for i in range(secondary_batch_size):
@@ -246,6 +246,7 @@ class EfficientSubclassSegmentation(BasePytorchLightningTrainer):
         return F.cross_entropy(x, y, **kw)
     
     def get_loss(self, preds, coarse=None, fine=None, one_hot_y=False, mixup_only=False):
+        if preds.shape[0] == 0: return 0
         if mixup_only: 
             one_hot_y = True
             if coarse is not None: coarse = rearrange(F.one_hot(coarse, self.n_coarse), "b 1 ... c -> b c ...")
@@ -272,13 +273,9 @@ class EfficientSubclassSegmentation(BasePytorchLightningTrainer):
         loss_dict = {}
         image, coarse, fine = map(lambda x: self.get_input(batch, x), 
                                   [self.image_key, self.coarse_key, self.fine_key])
-        coarse, fine = coarse[:, 0].long(), fine[:, 0].long()
+        coarse, fine = coarse.long(), fine.long()
         prefix = "train" if self.training else "val"
-        if not self.use_ldm_mixup:
-            model_outputs_coarse, model_outputs_fine = self.apply_model(image)
-        else:
-            raw = self.get_input(batch, "raw")
-            model_outputs_coarse, model_outputs_fine = self.apply_model(torch.cat([image[:self.primary_batch_size], raw[self.primary_batch_size:]], dim=0))
+        model_outputs_coarse, model_outputs_fine = self.apply_model(image)
         
         # coarse loss
         loss_dict[f"{prefix}/coarse"] = self.get_loss(model_outputs_coarse, coarse=coarse)
@@ -286,19 +283,28 @@ class EfficientSubclassSegmentation(BasePytorchLightningTrainer):
         # fine loss
         if self.training:
             # primary batch
-            loss_dict[f"{prefix}/fine"] = self.get_loss(preds=model_outputs_fine[:self.primary_batch_size], fine=fine[:self.primary_batch_size])
+            if self.primary_batch_size > 0:
+                loss_dict[f"{prefix}/fine"] = self.get_loss(preds=model_outputs_fine[:self.primary_batch_size], fine=fine[:self.primary_batch_size])
+            else:
+                random_index = random.randint(0, coarse.shape[0] - 1)
+                loss_dict[f"{prefix}/fine"] = self.get_loss(preds=model_outputs_fine[random_index: random_index+1], fine=fine[random_index: random_index+1])
             # secondary batch
             model_outputs = model_outputs_fine
             model_preds = model_outputs.softmax(1)
         
             if self.use_mixup:
                 if self.use_ldm_mixup:
-                    mixed_image, mixed_fine = map(lambda x: x[self.primary_batch_size:], [image, fine])
-                    mixed_fine = rearrange(F.one_hot(mixed_fine, self.n_fine), "b ... c -> b c ...")
-                else:
-                    mixed_image, mixed_fine = self.mixup(image[:self.primary_batch_size], image[self.primary_batch_size:],
-                                                         fine[:self.primary_batch_size], coarse[self.primary_batch_size:],
-                                                         self.mixup_alphas)
+                    mixed_image, mixed_fine = map(lambda x: self.get_input(batch, x)[self.primary_batch_size:], ["mixed_image", "mixed_fine"])
+                    mixed_fine = mixed_fine.long()
+                    check_mix_validity = torch.argwhere(mixed_image.sum((1, 2, 3, 4)) == image[self.primary_batch_size:].sum((1, 2, 3, 4))).flatten()
+                if self.primary_batch_size > 0 and check_mix_validity.numel() > 0:
+                    random_primary_index = random.choice(list(_ for _ in range(self.primary_batch_size)))
+                    mixed_image_, mixed_fine_ = self.mixup(image[random_primary_index:random_primary_index+1], image[self.primary_batch_size:][check_mix_validity],
+                                                           fine[random_primary_index:random_primary_index+1][:, None].float(), coarse[self.primary_batch_size:][check_mix_validity][:, None].float(),
+                                                           self.mixup_alphas)
+                    mixed_image[check_mix_validity] = mixed_image_
+                    mixed_fine[check_mix_validity] = mixed_fine_[:, 0].long()
+                mixed_fine = rearrange(F.one_hot(mixed_fine, self.n_fine), "b ... c -> b c ...")
                 _, model_outputs_mixup = self.apply_model(mixed_image)
                 
             if self.use_pseudo:
@@ -319,13 +325,13 @@ class EfficientSubclassSegmentation(BasePytorchLightningTrainer):
             if self.use_mixup and self.use_pseudo:
                 loss_dict[f"{prefix}/agg"] = self.get_loss(model_outputs_mixup,
                                                  fine=self.mixup_alphas * trans_fine + (1 - self.mixup_alphas) * mixed_fine,
-                                                 one_hot_y=True)
+                                                 one_hot_y=True) / (1 + math.exp(-self.global_step // 1000))
             elif self.use_pseudo:
                 loss_dict[f"{prefix}/pseudo"] = self.get_loss(model_outputs,
-                                                    fine=trans_fine, one_hot_y=True)
+                                                    fine=trans_fine, one_hot_y=True) / (1 + math.exp(-self.global_step // 1000))
             elif self.use_mixup:
                 loss_dict[f"{prefix}/mixup"] = self.get_loss(model_outputs,
-                                                   fine=mixed_fine, one_hot_y=True, mixup_only=True)
+                                                   fine=mixed_fine, one_hot_y=True, mixup_only=True) / (1 + math.exp(-self.global_step // 1000))
         else:
             loss_dict[f"{prefix}/fine"] = self.get_loss(preds=model_outputs_fine, fine=fine)
                 

@@ -9,7 +9,9 @@ from copy import deepcopy
 from einops import rearrange
 from glob import glob
 import numpy as np
+import torchmetrics
 from natsort import natsorted
+import torchmetrics.classification
 
 from ldm.modules.encoders.modules import TransformerEmbedder
 from ldm.modules.diffusionmodules.model import Encoder
@@ -277,7 +279,8 @@ class CharacteristicClassifier(pl.LightningModule):
                  num_feature_classes={"sex": 2},
                  ckpt_path=None,
                  data_key="image",
-                 feature_key=["sex"],
+                 cond_key=None,
+                 conditioning_key="concat",
                  dims=3,
                  ignore_keys=[],
                  training_encoder=False,
@@ -289,15 +292,17 @@ class CharacteristicClassifier(pl.LightningModule):
         super().__init__()
         self.dims = dims
         self.data_key = data_key
+        self.cond_key = cond_key
+        self.conditioning_key = conditioning_key
         self.monitor = monitor
-        self.feature_key = OmegaConf.to_container(feature_key)
+        self.feature_key = list(num_feature_classes.keys())
         self.encoder = instantiate_from_config(encoder_config)
         self.training_encoder = training_encoder
         if not training_encoder:
             for p in self.encoder.parameters():
                 p.detach_().requires_grad_(False)
+        self.is_conditional = self.cond_key is not None
         
-        network_out = round(np.prod(np.array(self.encoder.resolution)) / 2 ** (self.dims * (self.encoder.num_resolutions - 1)))
         self.classifiers = torch.nn.ModuleDict()
         conv_nd = getattr(torch.nn, f"Conv{self.dims}d", torch.nn.Identity)
         batchnorm_nd = getattr(torch.nn, f"BatchNorm{self.dims}d", torch.nn.Identity)
@@ -305,15 +310,17 @@ class CharacteristicClassifier(pl.LightningModule):
             activation = torch.nn.ReLU
         elif activation == "leakyrelu":
             activation = torch.nn.LeakyReLU
-        for key in feature_key:
+        for key in self.feature_key:
             classifier = torch.nn.ModuleList()
-            feature_encoder = Encoder(**feature_encoder_config)
-            network_out = round(np.prod(np.array(feature_encoder.resolution)) / 2 ** (self.dims * (feature_encoder.num_resolutions - 1))) * feature_encoder_config["z_channels"]
+            feature_encoder = instantiate_from_config(feature_encoder_config)
+            network_out = round(np.prod(np.array(feature_encoder.resolution)) / 2 ** (self.dims * (feature_encoder.num_resolutions - 1))) * feature_encoder_config["params"]["z_channels"]
             classifier.append(feature_encoder)
             classifier.append(torch.nn.Linear(network_out, num_feature_classes[key]))
             self.classifiers[key] = classifier
         
         if ckpt_path is not None: self.init_from_ckpt(ckpt_path, ignore_keys, only_load_encoder)
+        self.accuracy = {key: torchmetrics.classification.Accuracy(task="multiclass", num_classes=num_feature_classes[key]) for key in self.feature_key}
+        # self.auroc = {key: torchmetrics.classification.AUROC(task="multiclass", num_classes=num_feature_classes[key]) for key in self.feature_key}
         
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
         sd = torch.load(path, map_location="cpu")
@@ -351,27 +358,45 @@ class CharacteristicClassifier(pl.LightningModule):
     @property
     def dataset_connector(self):
         return self.trainer._data_connector.trainer.datamodule.datasets["train"]
+    
+    def on_fit_start(self, **kw):
+        for metric_key in self.accuracy.keys():
+            self.accuracy[metric_key] = self.accuracy[metric_key].to(self.device)
+            # self.auroc[metric_key] = self.auroc[metric_key].to(self.device)
 
     def shared_step(self, batch):
         image = self.get_input(batch, self.data_key)
         feature = self.get_input(batch, self.feature_key)
-        model_outputs = self.encoder(image)
+        if not self.is_conditional:
+            model_outputs = self.encoder(image)
+        else:
+            cond = self.get_input(batch, self.cond_key)
+            if self.conditioning_key == "concat": 
+                image = torch.cat([image, cond], dim=1)
+                model_outputs = self.encoder(image)
+            if self.conditioning_key == "crossattn": 
+                model_outputs = self.encoder(image, context=cond)
         
         loss_all = 0.
         loss_log = {}
+        metric_log = {}
         log_prefix = "train" if self.training else "val"
         for k, classifier in self.classifiers.items():
             feat = feature[k]
-            is_valid = (feature[k][:, 0].sum() == 0) * 1.
+            is_valid = (feature[k][:, 0].sum(0, keepdim=True) == 0) * 1.
             preds = classifier[0](model_outputs)
             preds = classifier[1](preds.view(image.shape[0], -1))
-            loss = torch.nn.functional.cross_entropy(preds, feat)
+            loss = torch.nn.functional.cross_entropy(preds, feat.float())
             loss_all += loss * is_valid
+            loss_log[f"{log_prefix}/valid_{k}"] = is_valid.sum() / is_valid.numel()
             loss_log[f"{log_prefix}/loss_{k}"] = loss.item() * is_valid
+            metric_log[f"{log_prefix}/acc_{k}"] = self.accuracy[k](preds, feat.argmax(1)).item()
+            # metric_log[f"{log_prefix}/auroc_{k}"] = self.auroc[k](preds, feat.argmax(1))
             
-        self.log(f"{log_prefix}/loss", loss_all, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        self.log('global_step', self.global_step, logger=False, on_epoch=False, prog_bar=True, on_step=True)
-        self.log_dict(loss_log, prog_bar=True, on_step=True, on_epoch=True, logger=True)
+        self.log(f"{log_prefix}/loss", loss_all, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=1)
+        self.log('global_step', self.global_step, logger=False, on_epoch=False, prog_bar=True, on_step=True, sync_dist=1)
+        self.log_dict(loss_log, prog_bar=False, on_step=False, on_epoch=True, logger=True, sync_dist=1)
+        self.log_dict(metric_log, prog_bar=True, on_step=True, on_epoch=True, logger=True, sync_dist=1)
         return loss_all
     
     def training_step(self, batch, batch_idx):
@@ -386,23 +411,47 @@ class CharacteristicClassifier(pl.LightningModule):
         logs = {}
         image = self.get_input(batch, self.data_key)
         feature = self.get_input(batch, self.feature_key)
-        model_outputs = self.encoder(image)
+        if not self.is_conditional:
+            model_outputs = self.encoder(image)
+        else:
+            cond = self.get_input(batch, self.cond_key)
+            if self.conditioning_key == "concat": 
+                image = torch.cat([image, cond], dim=1)
+                model_outputs = self.encoder(image)
+            if self.conditioning_key == "crossattn": 
+                model_outputs = self.encoder(image, context=cond)
         
         feat_log = {}
+        metric_log = {}
+        log_prefix = "train" if self.training else "val"
         for k, classifier in self.classifiers.items():
+            feat = feature[k]
             preds = classifier[0](model_outputs)
             preds = classifier[1](preds.view(image.shape[0], -1))
+            metric_log[f"{log_prefix}/acc_{k}"] = self.accuracy[k](preds, feat.argmax(1))
+            # metric_log[f"{log_prefix}/auroc_{k}"] = self.auroc[k](preds, feat.argmax(1))
             feat_log[k] = preds
             
         logs["inputs"] = image
-        logs["feature_gt"] = self.dataset_connector.rev_parse(feature)
-        logs["feature_pred"] = self.dataset_connector.rev_parse(feat_log)
+        # logs["feature_gt"] = self.dataset_connector.rev_parse(feature)
+        # logs["feature_pred"] = self.dataset_connector.rev_parse(feat_log)
+        logs["metrics"] = str(metric_log)
         return logs
+    
+    def optimizer_step(self, epoch_nb, batch_nb, optimizer, optimizer_idx, optimizer_closure, **kw):
+        optimizer.step(optimizer_closure)
+        optimizer.zero_grad()
+        if epoch_nb > 0 and batch_nb == 0:
+            self.lr_schedulers().step()
     
     def configure_optimizers(self):
         param = list(self.classifiers.parameters())
         if self.training_encoder:
             param += list(self.encoder.parameters())
         optimizer = AdamW(param, lr=self.learning_rate)
-        return optimizer
+        scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, 
+                                                      start_factor=1, 
+                                                      end_factor=0, 
+                                                      total_iters=self.trainer.max_epochs)
+        return [optimizer], [scheduler]
         

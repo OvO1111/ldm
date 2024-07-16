@@ -1,80 +1,75 @@
 model:
-  base_learning_rate: 1.e-2
+  base_learning_rate: 1.e-4
   target: ldm.models.diffusion.classifier.CharacteristicClassifier
   params:
     data_key: image
-    feature_key: [age, sex, tumor_loc]
+    cond_key: totalseg
     num_feature_classes:  # 1 redundancy of index 0 to deal with missing cases
-      age: 11
+      loc: 6
       sex: 3
-      tumor_loc: 9
+      age: 11
+      tx: 6
+      nx: 3
+      mx: 3
+      race: 4
     monitor: val/loss
-    training_encoder: false
-    only_load_encoder: true
-    ckpt_path: /ailab/user/dailinrui/data/ldm/ensemble_vq_128_128_128/checkpoints/last.ckpt
+    training_encoder: true
+    # only_load_encoder: true
+    # ckpt_path: /ailab/user/dailinrui/data/ldm/ensemble_vq_128_128_128/checkpoints/last.ckpt
     
     encoder_config:
-      target: ldm.modules.diffusionmodules.model.Encoder
-      params:
-        double_z: false
-        z_channels: 4
-        resolution: [128, 128, 128]
-        in_channels: 1
-        out_ch: 4
-        ch: 128
-        ch_mult: [ 1, 1, 1 ]  # num_down = len(ch_mult)-1
-        num_res_blocks: 2
-        attn_resolutions: []
-        dropout: 0.0
-        dims: 3
-        attn_type: none
-        use_checkpoint: True  # always use ckpt
+      # target: ldm.modules.diffusionmodules.model.Encoder
+      # params:
+      #   double_z: false
+      #   z_channels: 128
+      #   resolution: [128, 128, 128]
+      #   in_channels: 2
+      #   out_ch: 4 # not used
+      #   ch: 16
+      #   ch_mult: [ 1, 2, 4, 8 ]  # num_down = len(ch_mult)-1
+      #   num_res_blocks: 2
+      #   attn_resolutions: [8]
+      #   dropout: 0.0
+      #   dims: 3
+      #   attn_type: vanilla
+      #   use_checkpoint: True  # always use ckpt
+      target: torch.nn.Identity
 
     feature_encoder_config:
       target: ldm.modules.diffusionmodules.model.Encoder
       params:
         double_z: false
         z_channels: 4
-        resolution: [32, 32, 32]
-        in_channels: 4
-        ch: 64
-        ch_mult: [ 1, 2, 2, 4]  # num_down = len(ch_mult)-1
+        resolution: [128, 128, 128]
+        in_channels: 2
+        ch: 32
+        out_ch: 4 # not used
+        ch_mult: [ 1, 1, 2, 4, 8 ]  # num_down = len(ch_mult)-1
         num_res_blocks: 2
-        attn_resolutions: [8]
-        dropout: 0.0
+        attn_resolutions: [8, 16]
+        dropout: 0.2
         dims: 3
-        attn_type: vanilla
+        attn_type: none
         use_checkpoint: True  # always use ckpt
 
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 1
-    num_workers: 2
+    batch_size: 2
+    num_workers: 8
     wrap: False
     train:
-      target: ldm.data.ensemble.EnsembleDataset
+      target: ldm.data.ensemble_v2.GatheredDatasetForClassification
       params:
         split: train
         resize_to: [128, 128, 128]
     validation:
-      target: ldm.data.ensemble.EnsembleDataset
+      target: ldm.data.ensemble_v2.GatheredDatasetForClassification
       params:
         split: val
         resize_to: [128, 128, 128]
-        max_size: 200
 
 lightning:
-  callbacks:
-    image_logger:
-      target: main.ImageLogger
-      params:
-        train_batch_frequency: 500
-        max_images: 5
-        logger:
-          inputs: 
-            target: image_rescale
-
   trainer:
     benchmark: True
     max_epochs: 1000

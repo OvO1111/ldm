@@ -142,7 +142,7 @@ def combine_mask_and_im_v2(x,
                 if i != 0:
                     binary = (b == i).astype(np.uint8)
                     contour, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    cv2.drawContours(contours[ib // h, ib % h] if x.ndim == 5 else contours[ib], contour, -1, colors[i], 1)
+                    cv2.drawContours(contours[ib // h, ib % h] if x.ndim == 5 else contours[ib], contour, -1, colors[i-1], 1)
                     cv2.destroyAllWindows()
     elif backend == "edt":
         for ib, b in enumerate(mask):
@@ -159,7 +159,7 @@ def combine_mask_and_im_v2(x,
                     box_binary = binary[*box]
                     contour = distance_transform_edt(box_binary == 0, )
                     contour = (contour > 0) & (contour < 1.8)
-                    contours[ib, *box][contour] = np.expand_dims(np.array(colors[i]), 0).repeat(contour.sum(), 0)
+                    contours[ib, *box][contour] = np.expand_dims(np.array(colors[i-1]), 0).repeat(contour.sum(), 0)
     contours[contours[..., 0] == 0, :] = image[contours[..., 0] == 0]
     colored_image = image * (1 - overlay_coef) + contours * overlay_coef
     
@@ -183,10 +183,11 @@ def visualize(image: torch.Tensor, n_mask: int=20, num_images=8, is_mask=False):
 
     if is_mask:
         cmap = get_cmap("viridis")
-        rgb = torch.tensor([(0, 0, 0)] + [cmap(i)[:-1] for i in np.arange(0.3, n_mask) / n_mask], device=image.device)
+        rgb = torch.tensor([(0, 0, 0)] + [cmap(i)[:-1] for i in (n_mask - np.arange(0., n_mask)) / n_mask], device=image.device)
         colored_mask = rearrange(rgb[image.long()][0], "i j n -> 1 n i j")
         return colored_mask.squeeze().data.cpu().numpy()
     else:
+        image = (image - image.min()) / (image.max() - image.min())
         return image.squeeze().data.cpu().numpy()
     
 
@@ -312,7 +313,7 @@ class TwoStreamBatchSampler(Sampler):
         # primary_iter = iterate_eternally(self.primary_indices, len(self.secondary_indices) // len(self.primary_indices) if not self.iterate_on_primary_indices else 1)
         if self.secondary_batch_size != 0:
             primary_iter = iterate_once(self.primary_indices) if self.iterate_on_primary_indices else iterate_eternally(self.primary_indices)
-            secondary_iter = iterate_eternally(self.secondary_indices) if not self.iterate_on_primary_indices else iterate_once(self.secondary_indices)
+            secondary_iter = iterate_eternally(self.secondary_indices) if self.iterate_on_primary_indices else iterate_once(self.secondary_indices)
             return (
                 primary_batch + secondary_batch
                 for (primary_batch, secondary_batch)
@@ -349,7 +350,7 @@ class DistributedTwoStreamBatchSampler(DistributedSampler):
         # primary_iter = iterate_eternally(self.primary_indices, len(self.secondary_indices) // len(self.primary_indices) if not self.iterate_on_primary_indices else 1)
         if self.secondary_batch_size != 0:
             primary_iter = iterate_once(self.primary_indices) if self.iterate_on_primary_indices else iterate_eternally(self.primary_indices)
-            secondary_iter = iterate_eternally(self.secondary_indices) if not self.iterate_on_primary_indices else iterate_once(self.secondary_indices)
+            secondary_iter = iterate_eternally(self.secondary_indices) if self.iterate_on_primary_indices else iterate_once(self.secondary_indices)
             return (
                 primary_batch + secondary_batch
                 for (primary_batch, secondary_batch)

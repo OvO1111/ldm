@@ -1,6 +1,6 @@
 import os, sys
 sys.path.append("/ailab/user/dailinrui/code/latentdiffusion")
-import h5py, SimpleITK as sitk, numpy as np
+import h5py, SimpleITK as sitk, numpy as np, nibabel as nib
 import json, torchio as tio, torchvision.transforms.v2 as v2, shutil
 
 import torch, random
@@ -13,7 +13,7 @@ from ldm.data.utils import conserve_only_certain_labels, identity, window_norm, 
 
 class Ruijin_3D(Dataset):
     def __init__(self, split="train", 
-                force_rewrite_split=True, 
+                force_rewrite_split=False, 
                 resize_to=(64, 128, 128),
                 max_size=None,
                 context_len=None,
@@ -27,8 +27,7 @@ class Ruijin_3D(Dataset):
 
         self.use_summary_level = use_summary_level
         self.collate_context_len = context_len
-        self.get_spacing = lambda x: sitk.ReadImage(x).GetSpacing()
-        self.load_fn = lambda x: sitk.GetArrayFromImage(sitk.ReadImage(x))
+
         self.transforms = dict(
             resize_base=TorchioBaseResizer(),
             resize=tio.Resize(resize_to) if resize_to is not None else tio.Lambda(identity),
@@ -38,7 +37,6 @@ class Ruijin_3D(Dataset):
                                                             foreground_mask_label=None,
                                                             outline=(0, 0, 0))),
             normalize_image=tio.Lambda(window_norm, include=["image"]),
-            normalize_mask=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(0, 11), include=["mask"])
         )
 
         self.split = split
@@ -64,6 +62,29 @@ class Ruijin_3D(Dataset):
     def __len__(self):
         return len(self.split_keys)
     
+    def __str__(self):
+        return 'RJ'
+    
+    @staticmethod                
+    def load_fn(p, return_spacing=0, transpose_code=None):
+        image = nib.load(p)
+        array = image.dataobj[:]
+        if transpose_code is None:
+            x, y, z = nib.aff2axcodes(image.affine)
+        else:
+            x, y, z = transpose_code
+        dims = [0, 1, 2]
+        for ianc, anc in enumerate([x, y, z]):
+            dims[0 if anc in ['S', 'I'] else 1 if anc in ['P', 'A'] else 2 if anc in ['L', 'R'] else 10] = ianc
+        array = array.transpose(*dims)
+        if "S" not in [x, y, z]: array = np.flip(array, axis=0)
+        if "P" not in [x, y, z]: array = np.flip(array, axis=1)
+        if "L" not in [x, y, z]: array = np.flip(array, axis=2)
+        array = array.copy()
+        if return_spacing:
+            return array, tuple(np.array(image.header.get_zooms())[dims].tolist()), [x, y, z]
+        return array
+    
     @staticmethod
     def _get_class(text):
         class_id = -1
@@ -79,8 +100,8 @@ class Ruijin_3D(Dataset):
         item = self.data[self.split_keys[idx]] if isinstance(idx, int) else idx
         context = torch.tensor(self.context[self.split_keys[idx] if isinstance(idx, int) else idx])
         data, totalseg, crcseg, text = map(lambda x: item[x], ["ct", "totalseg", "crcseg", "summary"])
-        spacing = self.get_spacing(totalseg)
-        image, mask, crcmask = map(self.load_fn, [data, totalseg, crcseg])
+        image, spacing, code = self.load_fn(data, 1)
+        mask, crcmask = map(lambda x: self.load_fn(x, transpose_code=code), [totalseg, crcseg])
         
         if self.use_summary_level == "short": text = item.get("summary", "").split("；")[0]
         elif self.use_summary_level == "medium": text = item.get("summary", "")
@@ -114,6 +135,101 @@ class Ruijin_3D(Dataset):
         collated_context = torch.cat([torch.nn.functional.pad(c, (0, 0, 0, longest_context - c.shape[1]), mode="constant", value=0) if c.shape[1] <= longest_context else c[:, :longest_context] for c in context], dim=0)
         collated["context"] = collated_context
         return collated
+    
+    
+class Ruijin_2D(Dataset):
+    def __init__(self, split="train", 
+                force_rewrite_split=True, 
+                resize_to=(96, 512, 512),
+                max_size=None,
+                context_len=None,
+                use_summary_level="short",
+                text_encoder="CT_report_abstract_BLS_PULSE-20bv5_short"):
+        super().__init__()
+        with open('/ailab/user/dailinrui/data/records/dataset_crc_v2.json', 'rt') as f:
+            self.data = json.load(f)
+            self.data_keys = list(self.data.keys())
+            self.data_keys.remove("RJ202302171638326937")
+
+        self.use_summary_level = use_summary_level
+        self.collate_context_len = context_len
+        self.get_spacing = lambda x: sitk.ReadImage(x).GetSpacing()
+        self.load_fn = lambda x: sitk.GetArrayFromImage(sitk.ReadImage(x))
+        self.transforms = dict(
+            resize_base=TorchioBaseResizer(),
+            resize=tio.Resize(resize_to) if resize_to is not None else tio.Lambda(identity),
+            crop=TorchioForegroundCropper(crop_level="image_foreground", 
+                                          crop_anchor="image",
+                                          crop_kwargs=dict(foreground_hu_lb=1e-3,
+                                                            foreground_mask_label=None,
+                                                            outline=(0, 0, 0))),
+            normalize_image=tio.Lambda(window_norm, include=["image"]),
+        )
+
+        self.split = split
+        np.random.shuffle(self.data_keys)
+        self.train_keys = self.data_keys[:round(len(self.data_keys) * 0.8)]
+        self.val_keys = self.data_keys[round(len(self.data_keys) * 0.8):round(len(self.data_keys) * 0.8)+10]
+        self.test_keys = self.data_keys[round(len(self.data_keys) * 0.8)+10:]
+        
+        if "PULSE" in text_encoder:
+            if "short" in text_encoder: self.use_summary_level = "short"
+            if "medium" in text_encoder: self.use_summary_level = "medium"
+            if "long" in text_encoder: self.use_summary_level = "long"
+            
+        self.context = {name: value for name, value in np.load(f"/ailab/user/dailinrui/data/dependency/{text_encoder}.npz").items()}
+
+        self.train_keys, self.val_keys, self.test_keys = load_or_write_split("/ailab/user/dailinrui/data/ldm/",
+                                                                             force_rewrite_split,
+                                                                             train=self.train_keys, 
+                                                                             val=self.val_keys, test=self.test_keys)
+        self.split_keys = getattr(self, f"{split}_keys")[slice(0, max_size)]
+        self.parser = LabelParser(totalseg_version="v1")
+        
+    def __len__(self,):
+        return len(self.split_keys)
+        
+    def __getitem__(self, idx):
+        item = self.data[self.split_keys[idx]] if isinstance(idx, int) else idx
+        context = torch.tensor(self.context[self.split_keys[idx] if isinstance(idx, int) else idx])
+        data, totalseg, crcseg, text = map(lambda x: item[x], ["ct", "totalseg", "crcseg", "summary"])
+        spacing = self.get_spacing(totalseg)
+        image, mask, crcmask = map(self.load_fn, [data, totalseg, crcseg])
+        
+        if self.use_summary_level == "short": text = item.get("summary", "").split("；")[0]
+        elif self.use_summary_level == "medium": text = item.get("summary", "")
+        elif self.use_summary_level == "long": text = item.get("text", "")
+        
+        mask = conserve_only_certain_labels(mask)
+        mask[crcmask > 0] = 11
+        
+        subject = tio.Subject(image=tio.ScalarImage(tensor=image[None], spacing=spacing), mask=tio.LabelMap(tensor=mask[None], spacing=spacing),)
+        # resize based on spacing
+        subject = self.transforms["resize_base"](subject)
+        # crop
+        subject = self.transforms["crop"](subject)
+        ori_size = subject.image.data.shape
+        # normalize
+        subject = self.transforms["normalize_image"](subject)
+        # resize
+        subject = self.transforms["resize"](subject)
+        # slice
+        start_slice = random.randint(1, subject.image.data.shape[1] - 1)
+        previous_slice = start_slice - 1
+        subject = {"image": subject.image.data[:, start_slice], "mask": subject.mask.data[:, start_slice], "prev": subject.image.data[:, previous_slice]} 
+        subject = subject | {"text": text, "context": context, "ori_size": ori_size}
+        subject = subject | {"cat": torch.cat([subject["prev"], subject["mask"]], dim=0)}
+
+        return subject
+    
+    def collate(self, batch):
+        context = [b["context"] for b in batch]
+        for b in batch: del b["context"]
+        collated = _utils.collate.default_collate(batch)
+        longest_context = max([b.shape[0] for b in context]) if self.collate_context_len is None else self.collate_context_len
+        collated_context = torch.cat([torch.nn.functional.pad(c, (0, 0, 0, longest_context - c.shape[1]), mode="constant", value=0) if c.shape[1] <= longest_context else c[:, :longest_context] for c in context], dim=0)
+        collated["context"] = collated_context
+        return collated    
     
     
 class RuijinJointDataset(Dataset):

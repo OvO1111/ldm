@@ -1,25 +1,20 @@
 model:
-  base_learning_rate: 2e-5
-  target: ldm.models.autoencoder.VQModel
+  base_learning_rate: 1e-4
+  target: inference.models.InferAutoencoderVQ
   params:
     monitor: "val/rec_loss"
     image_key: image
-    embed_dim: 8
+    embed_dim: 4
     n_embed: 8192
     dims: 3
-    use_window_norm: true  
+    use_window_norm: false  
     lossconfig:
-      target: ldm.modules.losses.VQLPIPSWithDiscriminator
+      target: torch.nn.Identity
       params:
-        disc_start: 2001
-        disc_weight: 0.5
-        n_classes: 8192  # =n_embed
-        gan_feat_weight: 1.
-        nframes_select: 1  # 1 as in medicaldiffusion
 
     ddconfig:
       double_z: false
-      z_channels: 8
+      z_channels: 4
       resolution: [128, 128, 128]
       in_channels: 1
       out_ch: 1
@@ -32,40 +27,35 @@ model:
       attn_type: none
       use_checkpoint: True  # always use ckpt
 
+    ckpt_path: /ailab/user/dailinrui/data/ldm/ensemble_multiwin_ldm_vq_128_128_128/checkpoints/last-v3.ckpt
+    save_dataset: true 
+    save_dataset_path: /ailab/user/dailinrui/data/ldm/ensemble_multiwin_ldm_vq_128_128_128
+
 data:
-  target: main.DataModuleFromConfig
+  target: test.DataModuleFromConfig
   params:
     batch_size: 1
     num_workers: 2
     wrap: False
-    train:
-      target: ldm.data.ensemble_v2.GatheredDatasetForGeneration
+    test:
+      target: ldm.data.ensemble.EnsembleDatasetV2
       params:
-        split: train
+        split: test
         resize_to: [128, 128, 128]
-    validation:
-      target: ldm.data.ensemble_v2.GatheredDatasetForGeneration
-      params:
-        split: val
-        resize_to: [128, 128, 128]
-        max_size: 200
 
 lightning:
   callbacks:
     image_logger:
-      target: main.ImageLogger
+      target: test.ImageLogger
       max_images: 10
       log_separate: false
       params:
         train_batch_frequency: 400
-        val_batch_frequency: 50
         max_images: 8
         logger:
           inputs: 
             target: image_rescale
           reconstruction:
-            target: image_rescale
-          samples:
             target: image_rescale
 
   trainer:

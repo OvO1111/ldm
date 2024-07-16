@@ -12,6 +12,8 @@ from ldm.modules.ema import LitEma
 from ldm.util import instantiate_from_config
 from torch.optim.lr_scheduler import LambdaLR
 from einops import rearrange
+from ldm.data.utils import window_norm
+
 
 # taming.modules.vqvae.quantize.VectorQuantizer
 class VectorQuantizer(nn.Module):
@@ -132,9 +134,11 @@ class VQModel(pl.LightningModule):
                  sane_index_shape=False, # tell vector quantizer to return indices as bhw
                  use_ema=False,
                  l1_weight=0.5,
-                 dims=3, is_conditional=False, cond_key=None, conditioning_key="concat"
+                 dims=3, is_conditional=False, cond_key=None, conditioning_key="concat",
+                 use_window_norm=False,
                  ):
         super().__init__()
+        self.use_window_norm = use_window_norm
         self.embed_dim = embed_dim
         self.n_embed = n_embed
         self.image_key = image_key
@@ -259,6 +263,14 @@ class VQModel(pl.LightningModule):
                 x = F.interpolate(x, size=new_resize, mode="bicubic")
             x = x.detach()
         return x
+    
+    def window_norm(self, x, y):
+        if self.use_window_norm:
+            window_pos = torch.randint(-10, 10, (1,), device=x.device) / 10
+            window_width = torch.randint(1, 20, (1,), device=x.device) / 10
+            x = window_norm(x, window_pos, window_width)
+            y = window_norm(y, window_pos, window_width)
+        return x, y
 
     def training_step(self, batch, batch_idx, optimizer_idx):
         # https://github.com/pytorch/pytorch/issues/37142
@@ -267,10 +279,12 @@ class VQModel(pl.LightningModule):
         if self.is_conditional: c_cat = self.get_input(batch, self.cond_key)
         else: c_cat = None
         xrec, qloss, ind = self(x, c_cat, return_pred_indices=True)
+        x_, xrec_ = self.window_norm(x, xrec)
         # loss = F.smooth_l1_loss(x, xrec) * self.l1_weight
 
         if optimizer_idx == 0:
             # autoencode
+            x, xrec = x_, xrec_
             aeloss, log_dict_ae = self.loss(qloss, x, xrec, optimizer_idx, self.global_step,
                                             last_layer=self.get_last_layer(), split="train",
                                             predicted_indices=ind)
@@ -375,6 +389,10 @@ class VQModel(pl.LightningModule):
             xrec = self.to_rgb(xrec)
         log["inputs"] = x
         log["reconstructions"] = xrec
+        if self.use_window_norm:
+            x_, xrec_ = self.window_norm(x, xrec)
+            log["inputs_windowed"] = x_
+            log["reconstructions_windowed"] = xrec_
         if plot_ema:
             with self.ema_scope():
                 xrec_ema, _ = self(x, conditions)

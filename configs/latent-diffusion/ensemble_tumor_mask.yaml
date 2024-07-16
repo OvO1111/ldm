@@ -1,0 +1,81 @@
+model:
+  base_learning_rate: 1.0e-4
+  target: ldm.models.diffusion.ddpm.LatentDiffusion
+  params:
+    linear_start: 0.0015
+    linear_end: 0.0195
+    num_timesteps_cond: 1
+    log_every_t: 200
+    timesteps: 1000
+    first_stage_key: mask
+    conditioning_key: hybrid
+    cond_stage_key: 
+      crossattn: prompt_context
+      concat: totalseg
+    image_size: [128, 128, 128]  # after first-stage encoding
+    channels: 1  # after first-stage encoding
+    monitor: val/loss_simple_ema
+    cond_stage_trainable: false
+
+    unet_config:
+      target: ldm.modules.diffusionmodules.openaimodel.UNetModel
+      params:
+        image_size: 128  # not used
+        in_channels: 2
+        out_channels: 1
+        model_channels: 32
+        attention_resolutions: [16, 8]
+        num_res_blocks: 2
+        channel_mult: [1, 2, 4, 4, 8]
+        num_head_channels: 32
+        use_checkpoint: true  # always use ckpt
+
+    first_stage_config: 
+      target: ldm.modules.encoders.modules.IdentityFirstStage
+
+    cond_stage_config: __is_first_stage__
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 1
+    num_workers: 1
+    wrap: False
+    train:
+      target: ldm.data.ensemble_v2.GatheredDatasetForGeneration
+      params:
+        split: train
+        resize_to: [128, 128, 128]
+    validation:
+      target: ldm.data.ensemble_v2.GatheredDatasetForGeneration
+      params:
+        split: val
+        resize_to: [128, 128, 128]
+
+lightning:
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        train_batch_frequency: 400
+        max_images: 10
+        # log_images_kwargs:
+        #   ddim_steps: null 
+        clamp: false
+        logger:
+          inputs: 
+            target: mask_rescale
+            params:
+              n_mask: 1
+          conditioning:
+            target: mask_rescale
+            params: 
+              n_mask: 20
+          samples:
+            target: mask_rescale
+            params:
+              n_mask: 1
+
+  trainer:
+    benchmark: True
+    max_epochs: 1000

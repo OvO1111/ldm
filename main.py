@@ -20,7 +20,6 @@ from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.utilities.distributed import rank_zero_only
 from pytorch_lightning.utilities import rank_zero_info
 
-from ldm.data.base import Txt2ImgIterableBaseDataset
 from ldm.util import instantiate_from_config, get_obj_from_str
 from inference.utils import TwoStreamBatchSampler, DistributedTwoStreamBatchSampler, image_logger, visualize, combine_mask_and_im_v2
 
@@ -157,14 +156,7 @@ def worker_init_fn(_):
     dataset = worker_info.dataset
     worker_id = worker_info.id
 
-    if isinstance(dataset, Txt2ImgIterableBaseDataset):
-        split_size = dataset.num_records // worker_info.num_workers
-        # reset num_records to the true number to retain reliable length information
-        dataset.sample_ids = dataset.valid_ids[worker_id * split_size:(worker_id + 1) * split_size]
-        current_id = np.random.choice(len(np.random.get_state()[1]), 1)
-        return np.random.seed(np.random.get_state()[1][current_id] + worker_id)
-    else:
-        return np.random.seed(np.random.get_state()[1][0] + worker_id)
+    return np.random.seed(np.random.get_state()[1][0] + worker_id)
 
 
 class DataModuleFromConfig(pl.LightningDataModule):
@@ -213,8 +205,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
             raise NotImplementedError()
 
     def _train_dataloader(self):                
-        is_iterable_dataset = isinstance(self.datasets['train'], Txt2ImgIterableBaseDataset)
-        if is_iterable_dataset or self.use_worker_init_fn:
+        if self.use_worker_init_fn:
             init_fn = worker_init_fn
         else:
             init_fn = None
@@ -223,7 +214,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
                               batch_size=self.batch_size,
                               num_workers=self.num_workers,
                               worker_init_fn=init_fn,
-                              shuffle=True if not is_iterable_dataset else False, 
+                              shuffle=True, 
                               collate_fn=getattr(self.datasets["train"], "collate", _utils.collate.default_collate))
         else:
             return DataLoader(self.datasets["train"],
@@ -233,7 +224,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
                               collate_fn=getattr(self.datasets["train"], "collate", _utils.collate.default_collate))
 
     def _val_dataloader(self, shuffle=False, batch_size=None):
-        if isinstance(self.datasets['validation'], Txt2ImgIterableBaseDataset) or self.use_worker_init_fn:
+        if self.use_worker_init_fn:
             init_fn = worker_init_fn
         else:
             init_fn = None
@@ -471,52 +462,6 @@ class CUDACallback(Callback):
 
 
 if __name__ == "__main__":
-    # custom parser to specify config files, train, test and debug mode,
-    # postfix, resume.
-    # `--key value` arguments are interpreted as arguments to the trainer.
-    # `nested.key=value` arguments are interpreted as config parameters.
-    # configs are merged from left-to-right followed by command line parameters.
-
-    # model:
-    #   base_learning_rate: float
-    #   target: path to lightning module
-    #   params:
-    #       key: value
-    # data:
-    #   target: main.DataModuleFromConfig
-    #   params:
-    #      batch_size: int
-    #      wrap: bool
-    #      train:
-    #          target: path to train dataset
-    #          params:
-    #              key: value
-    #      validation:
-    #          target: path to validation dataset
-    #          params:
-    #              key: value
-    #      test:
-    #          target: path to test dataset
-    #          params:
-    #              key: value
-    # lightning: (optional, has sane defaults and can be specified on cmdline)
-    #   trainer:
-    #       additional arguments to trainer
-    #   logger:
-    #       logger to instantiate
-    #   modelcheckpoint:
-    #       modelcheckpoint to instantiate
-    #   callbacks:
-    #       callback1:
-    #           target: importpath
-    #           params:
-    #               key: value
-
-    # now = datetime.datetime.now().strftime("%Y-%m-%d")
-
-    # add cwd for convenience and to make classes in this file available when
-    # running as `python main.py`
-    # (in particular `main.DataModuleFromConfig`)
     sys.path.append(os.getcwd())
 
     parser = get_parser()
@@ -601,7 +546,8 @@ if __name__ == "__main__":
             "wandb": {
                 "target": "pytorch_lightning.loggers.WandbLogger",
                 "params": {
-                    "name": nowname.replace("/", "_"),
+                    'project': nowname.replace("/", "_"),
+                    "name": datetime.datetime.now().strftime("%Y%m%d-%H%M%S"),
                     "save_dir": logdir,
                     "offline": opt.debug,
                     "id": nowname.replace("/", "_"),
@@ -661,13 +607,6 @@ if __name__ == "__main__":
                     "cfgdir": cfgdir,
                     "config": config,
                     "lightning_config": lightning_config,
-                }
-            },
-            "image_logger": {
-                "target": "main.ImageLogger",
-                "params": {
-                    "train_batch_frequency": 750,
-                    "max_images": 40,
                 }
             },
             "learning_rate_logger": {

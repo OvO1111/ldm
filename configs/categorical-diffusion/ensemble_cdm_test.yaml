@@ -26,7 +26,7 @@ model:
     # whether use legacy
     use_legacy: true
     parameterization: kl 
-    ckpt_path: /ailab/user/dailinrui/data/ccdm/ensemble_128_128_128_baseline/checkpoint/checkpoint_ep150_gs440618.ckpt
+    ckpt_path: /ailab/user/dailinrui/data/ccdm/ensemble_128_128_128_baseline/checkpoint/last.ckpt
 
     # make dataset
     save_dataset: true 
@@ -74,9 +74,9 @@ data:
       target: ldm.data.ensemble.EnsembleDataset
       params:
         use_dataset_name: [ruijin, pancreas, liver]
-        split: train
+        split: test
         resize_to: [128, 128, 128]
-        max_size: 50
+        max_size: 100
 
 lightning:
   callbacks:

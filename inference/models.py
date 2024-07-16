@@ -15,8 +15,8 @@ from medpy.metric import binary
 from einops import rearrange, repeat
 from ldm.data.utils import load_or_write_split
 from ldm.util import instantiate_from_config
-from ldm.models.autoencoder import AutoencoderKL
-from ldm.models.diffusion.ddpm import LatentDiffusion
+from ldm.models.autoencoder import AutoencoderKL, VQModelInterface
+from ldm.models.diffusion.ddpm import LatentDiffusion, ContrastiveDiffusion
 from ldm.models.diffusion.ccdm import CategoricalDiffusion, OneHotCategoricalBCHW
 from ldm.models.diffusion.classifier import CharacteristicClassifier
 from ldm.models.downstream.efficient_subclass import EfficientSubclassSegmentation
@@ -53,6 +53,7 @@ class ComputeMetrics:
             from torchmetrics.image.fid import FrechetInceptionDistance
             self.fvd_module: nn.Module = instantiate_from_config(fvd_config)
             self.fvd = FrechetInceptionDistance(feature=self.fvd_module, normalize=True)
+        self.metrics = {"carry": []}
     
     @torch.no_grad()
     def log_eval(self, x, y, log_group_metrics_in_2d=False):
@@ -98,6 +99,8 @@ class ComputeMetrics:
                 psnr = self.psnr(x, y)
             
                 metrics["PSNR"] = psnr.item()
+                
+        self.metrics["carry"].append(metrics)
         return metrics
 
     @torch.no_grad()
@@ -230,6 +233,49 @@ class InferAutoencoderKL(AutoencoderKL, ComputeMetrics):
             self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             return metrics, logs
         return {}, logs
+    
+    
+class InferAutoencoderVQ(VQModelInterface, ComputeMetrics, MakeDataset):
+    def __init__(self, 
+                 eval_scheme=[1],
+                 save_dataset=False,
+                 save_dataset_path=None,
+                 include_keys=["image"],
+                 suffix_keys={"image":".nii.gz",},
+                 **diffusion_kwargs):
+        if save_dataset:
+            self.save_dataset = save_dataset
+            assert exists(save_dataset_path)
+            MakeDataset.__init__(self, save_dataset_path, include_keys, suffix_keys)
+        VQModelInterface.__init__(self, **diffusion_kwargs)
+        ComputeMetrics.__init__(self, eval_scheme)
+        self.eval()
+        
+    def on_test_start(self, *args):
+        if MetricType.fid in self.eval_scheme:
+            self.fid = self.fid.to(self.device)
+        if MetricType.fvd in self.eval_scheme:
+            self.fvd = self.fvd.to(self.device)
+        
+    @torch.no_grad()
+    def test_step(self, batch, batch_idx):
+        pass
+    
+    @torch.no_grad()   
+    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, *args, **kwargs):
+        logs = super(VQModelInterface, self).log_images(batch, *args, **kwargs)
+        x = logs["inputs"]
+        x_recon = logs["reconstructions"]
+        
+        if self.save_dataset:
+            self.add({"image": x_recon}, batch.get("casename"), dtypes={"image": np.uint8})
+        
+        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
+            metrics = self.log_eval(x_recon, x, log_group_metrics_in_2d)
+            # print(metrics)
+            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            return metrics, logs
+        return {}, logs
         
     
 class InferLatentDiffusion(LatentDiffusion, ComputeMetrics, MakeDataset):
@@ -301,7 +347,12 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
     def on_test_end(self, *args):
         if self.save_dataset:
             datasets = torch.distributed.gather_object(self.dataset)
-        self.finalize(datasets)
+            metrics = torch.distributed.gather_object(self.metrics)
+            mean_metrics = {"mean_metrics": {m: np.mean([c[m] for c in metrics]) for m in metrics[0].keys()},
+                            "ind_metrics": metrics}
+            self.finalize(datasets, mean_metrics)
+        else:
+            self.finalize()
         
     @torch.no_grad()
     def test_step(self, batch, batch_idx):
@@ -575,6 +626,7 @@ class InferMixedDiffusion(InferLatentDiffusion):
         cf = super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key).to(self.device) if self.is_conditional_first_stage else None
         
         if sample:
+            inputs = x
             samples, _ = self.sample_log(cond=c, batch_size=B, ddim=use_ddim, ddim_steps=ddim_steps, eta=eta)
             logs["samples"] = self.decode_first_stage(samples, cf)
             primary_batch_size = self.trainer.datamodule.batch_sampler.primary_batch_size
@@ -585,45 +637,57 @@ class InferMixedDiffusion(InferLatentDiffusion):
                 z_mix, mask_mix, mix_log = [], [], []
                 for b in range(primary_batch_size):
                     z_fine = z_fines[b: b + 1]
-                    z_coarse = samples[primary_batch_size:]
+                    z_coarse = z[primary_batch_size:]
                     # convert mask shape to match latent shape
-                    mask_fine = self._interpolate(cx[b: b+1].to(torch.float32), z_fine.shape[2:], mode="nearest")
-                    mask_coarse = self._interpolate((cx[primary_batch_size:] > 0).to(torch.float32), z_coarse.shape[2:], mode="nearest")
+                    mask_fine = cx[b:b+1].float()
+                    mask_coarse = cx[primary_batch_size:].float()
+                    mask_fine_down = self._interpolate(cx[b: b+1].to(torch.float32), z_fine.shape[2:], mode="nearest")
+                    mask_coarse_down = self._interpolate((cx[primary_batch_size:] > 0).to(torch.float32), z_coarse.shape[2:], mode="nearest")
                     # crop foreground region
-                    z_fine_masked_cropped = self._get_foreground_bbox(mask_fine)
-                    z_coarse_masked_cropped = self._get_foreground_bbox(mask_coarse, use_shape_on_background=True)
+                    i_fine_masked_cropped = self._get_foreground_bbox(mask_fine)
+                    i_coarse_masked_cropped = self._get_foreground_bbox(mask_coarse, use_shape_on_background=True)
+                    z_fine_masked_cropped = self._get_foreground_bbox(mask_fine_down)
+                    z_coarse_masked_cropped = self._get_foreground_bbox(mask_coarse_down, use_shape_on_background=True)
                     # resize fine foregrounds to coarse's size
-                    z_fine_reshaped, mask_fine_reshaped = [], []
+                    z_fine_reshaped, mask_fine_reshaped, mask_fine_reshaped_down = [], [], []
                     for i in range(B - primary_batch_size):
                         if z_fine_masked_cropped[0] is not None and z_coarse_masked_cropped[i] is not None:
                             mix_log.append("ok")
                             z_fine_reshaped.append(self._interpolate(z_fine[*z_fine_masked_cropped[0]], z_coarse[*z_coarse_masked_cropped[i]].shape[2:], mode="trilinear"))
-                            mask_fine_reshaped.append(self._interpolate(mask_fine[*z_fine_masked_cropped[0]], mask_coarse[*z_coarse_masked_cropped[i]].shape[2:], mode="nearest"))
+                            mask_fine_reshaped_down.append(self._interpolate(mask_fine[*z_fine_masked_cropped[0]], mask_coarse[*z_coarse_masked_cropped[i]].shape[2:], mode="nearest"))
+                            mask_fine_reshaped.append(self._interpolate(mask_fine[*i_fine_masked_cropped[0]], mask_coarse[*i_coarse_masked_cropped[i]].shape[2:], mode="nearest"))
                         else:
                             if z_coarse_masked_cropped[i] is None:
                                 mix_log.append("nocrop-C")
                                 z_coarse_masked_cropped[i] = [slice(0, z_coarse[i].shape[j] + 1) for j in range(len(z_coarse[i].shape))]
                             mix_log.append("nocrop-F")
                             z_fine_reshaped.append(z_coarse[*z_coarse_masked_cropped[i]])
-                            mask_fine_reshaped.append(mask_coarse[*z_coarse_masked_cropped[i]])
+                            mask_fine_reshaped_down.append(mask_coarse[*z_coarse_masked_cropped[i]])
+                            mask_fine_reshaped.append(mask_coarse[*i_coarse_masked_cropped[i]])
                     # mixup
                     z_local_mix, mask_local_mix = [], []
                     for i in range(B - primary_batch_size):
-                        z_fine_reshaped[i][:, :, mask_fine_reshaped[i][0, 0] == 0] = z_coarse[*z_coarse_masked_cropped[i]][:, :, mask_fine_reshaped[i][0, 0] == 0]
-                        mask_fine_reshaped[i][:, :, mask_fine_reshaped[i][0, 0] == 0] = mask_coarse[*z_coarse_masked_cropped[i]][:, :, mask_fine_reshaped[i][0, 0] == 0]
+                        z_fine_reshaped[i][:, :, mask_fine_reshaped_down[i][0, 0] == 0] = z_coarse[*z_coarse_masked_cropped[i]][:, :, mask_fine_reshaped_down[i][0, 0] == 0]
+                        # mask_fine_reshaped[i][:, :, mask_fine_reshaped[i][0, 0] == 0] = mask_coarse[*z_coarse_masked_cropped[i]][:, :, mask_fine_reshaped[i][0, 0] == 0]
+                        mask_fine_reshaped[i][:, :, mask_coarse[*i_coarse_masked_cropped[i]][0, 0] == 0] = 0
                         z_local_mix.append(z_fine_reshaped[i] * (1 - alpha) + z_coarse[*z_coarse_masked_cropped[i]] * alpha)
                         mask_local_mix.append(mask_fine_reshaped[i])
                         
                     for i in range(B - primary_batch_size): z_coarse[i, *z_coarse_masked_cropped[i][1:]] = z_local_mix[i]
-                    for i in range(B - primary_batch_size): mask_coarse[i, *z_coarse_masked_cropped[i][1:]] = mask_local_mix[i]
+                    # for i in range(B - primary_batch_size): mask_coarse[i, *z_coarse_masked_cropped[i][1:]] = mask_local_mix[i]
+                    for i in range(B - primary_batch_size): mask_coarse[i, *i_coarse_masked_cropped[i][1:]] = mask_local_mix[i]
                     z_mix.append(z_coarse)
-                    mask_mix.append(self._interpolate(mask_coarse, cx.shape[2:], mode="trilinear"))
+                    mask_mix.append(self._interpolate(mask_coarse, cx.shape[2:], mode="trilinear").round())
                 
                 z_mix, mask_mix = map(lambda x: torch.cat(x, dim=0), [z_mix, mask_mix])
                 x_samples = self.decode_first_stage(z_mix, cx[primary_batch_size:])
-                logs["mixed_samples"] = x_samples
-                logs["mixed_fine"] = mask_mix
-                logs["mixed_coarse"] = ((mask_mix > 0) | (cx[primary_batch_size:] > 0)).float()
+                logs["image"] = logs["inputs"][:primary_batch_size] # fine image
+                logs["label"] = batch["fine"][:primary_batch_size].float() # fine label
+                logs["premix"] = logs["inputs"][primary_batch_size:] # coarse image
+                logs["premix_label"] = batch["coarse"][primary_batch_size:].float() # coarse label
+                logs["mixed_samples"] = x_samples  # mixed image
+                logs["mixed_fine"] = mask_mix      # mixed fine label
+                # logs["mixed_coarse"] = ((mask_mix > 0) | (cx[primary_batch_size:] > 0)).float()
                 logs["mix_log"] = ','.join(mix_log)
             
             elif self.mix_scheme == "direct":
@@ -664,15 +728,15 @@ class InferMixedDiffusion(InferLatentDiffusion):
                 
                 i_mix, mask_mix = torch.cat(i_mix, dim=0), torch.cat(mask_mix, dim=0)
                 z_mix = self.encode_first_stage(i_mix, cf[primary_batch_size:])
-                z_mix = self.p_sample_loop(cond=c[primary_batch_size:], shape=z_mix.shape, x_T=z_mix, timesteps=100, verbose=False)
+                # z_mix = self.p_sample_loop(cond=c[primary_batch_size:], shape=z_mix.shape, x_T=z_mix, timesteps=100, verbose=False)
                 i_mix = self.decode_first_stage(z_mix, cf[primary_batch_size:])
-                logs["samples"] = logs["samples"][:primary_batch_size]
+                logs["samples"] = logs["samples"][primary_batch_size:]
                 logs["mixed_samples"] = i_mix
                 logs["mixed_fine"] = mask_mix
                 logs["mixed_coarse"] = ((mask_mix > 0) | (cx[primary_batch_size:] > 0)).float()
                 logs["mix_log"] = ','.join(mix_log)
                 logs["alpha"] = torch.tensor([alpha,] * i_mix.shape[0])[:, None]
-            
+                
         x = logs["inputs"]
         x_samples = logs["samples"]
         
@@ -693,6 +757,147 @@ class InferMixedDiffusion(InferLatentDiffusion):
             return metrics, logs
         
         return None, logs
+    
+    
+class InferMixedAutoencoderVQ(VQModelInterface, ComputeMetrics, MakeDataset):
+    def __init__(self, 
+                 eval_scheme=[1],
+                 save_dataset=False,
+                 save_dataset_path=None,
+                 include_keys=["data", "text"],
+                 suffix_keys={"data":".nii.gz",},
+                 **diffusion_kwargs):
+        VQModelInterface.__init__(self, **diffusion_kwargs)
+        ComputeMetrics.__init__(self, eval_scheme)
+        self.save_dataset = save_dataset
+        if save_dataset:
+            assert exists(save_dataset_path)
+            MakeDataset.__init__(self, save_dataset_path, include_keys, suffix_keys)
+        self.eval()
+        
+    def add(self, samples, sample_names=None, dtypes={}, b_mapping={}):
+        if not exists(sample_names): sample_names = [f"case_{len(self.dataset) + i}" for i in range(self.bs)]
+        if isinstance(sample_names, str): sample_names = [sample_names]
+        for i in range(len(sample_names)): 
+            while sample_names[i] in self.dataset: sample_names[i] = sample_names[i] + "0"
+        B = samples[self.include_keys[0]].shape[0]
+        
+        for b in range(B):
+            sample_name_b = 'syn' + sample_names[b]
+            f = os.path.join(self.base, "data", sample_name_b + ".h5")
+            h5 = h5py.File(f, "w")
+            for key in self.include_keys:
+                b_ = b_mapping[sample_names[b]].get(key, b_mapping[sample_names[b]]["others"])
+                value_b = samples[key][b_]
+                if isinstance(value_b, torch.Tensor):
+                    im = value_b.cpu().data.numpy().astype(dtypes.get(key, np.float32))
+                    h5.create_dataset(key, data=self.postprocess(im), compression="gzip")
+            self.dataset[sample_name_b] = f
+            h5.close()
+        
+    @staticmethod
+    def _get_foreground_bbox(tensor, use_shape_on_background=False):
+        cropped = []
+        for it, t in enumerate(tensor):
+            # c h w d
+            if torch.any(t):
+                crop_x = torch.where(torch.any(torch.any(t, dim=2), dim=2))[1][[0, -1]]
+                crop_y = torch.where(torch.any(torch.any(t, dim=1), dim=2))[1][[0, -1]]
+                crop_z = torch.where(torch.any(torch.any(t, dim=1), dim=1))[1][[0, -1]]
+                cropped.append([slice(it, it + 1), slice(None, None),
+                                slice(crop_x[0], crop_x[1] + 1),
+                                slice(crop_y[0], crop_y[1] + 1),
+                                slice(crop_z[0], crop_z[1] + 1)])
+            else:
+                if use_shape_on_background: cropped.append(None)
+                else: cropped.append([slice(0, t.shape[i] + 1) for i in range(len(t.shape))])
+        return cropped
+    
+    @staticmethod
+    def _interpolate(tensor, *args, **kwargs):
+        mode = kwargs.get("mode", "nearest")
+        if mode == "nearest":
+            kwargs["mode"] = "trilinear"
+            return nn.functional.interpolate(tensor, align_corners=True, *args, **kwargs).round()
+        return nn.functional.interpolate(tensor, *args, **kwargs)
+    
+    @torch.no_grad()
+    def test_step(self, batch, batch_idx):
+        pass
+    
+    @torch.no_grad()
+    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, alpha=.2, *args, **kwargs):
+        logs = dict()
+        logs["inputs"] = self.get_input(batch, self.image_key)
+        B = logs["inputs"].shape[0]
+        primary_batch_size = self.trainer.datamodule.batch_sampler.primary_batch_size
+        cx = batch["mask"].clone()
+        cf = self.get_input(batch, self.cond_key) if self.is_conditional else None
+        
+        i_fine, i_coarse = logs["inputs"][:primary_batch_size].clone(), logs["inputs"][primary_batch_size:].clone()
+        mask_fine_all = cx[:primary_batch_size].float()
+        mask_coarse = cx[primary_batch_size:].float()
+        i_fine_masked_cropped_all = self._get_foreground_bbox(mask_fine_all)
+        i_coarse_masked_cropped = self._get_foreground_bbox(mask_coarse, use_shape_on_background=True)
+        z_fine_masked_cropped_all = [self.encode(i_fine[*i_fine_masked_cropped_all[i]], cf[i][None][*i_fine_masked_cropped_all[i]]) for i in range(primary_batch_size)]
+        z_coarse_masked_cropped_all = [self.encode(i_coarse[*i_coarse_masked_cropped[i]], cf[primary_batch_size+i][None][*i_coarse_masked_cropped[i]]) for i in range(B - primary_batch_size)]
+        
+        mask_mix, mix_log = [], []
+        for b in range(primary_batch_size):
+            # convert mask shape to match latent shape
+            mask_fine = cx[b:b+1].float()
+            mask_coarse = cx[primary_batch_size:].float()
+            # resize fine foregrounds to coarse's size
+            z_fine_reshaped = self._interpolate(z_fine_masked_cropped_all[b], (16, 16, 16), mode='trilinear')
+            z_coarse_reshaped = [self._interpolate(z_coarse_masked_cropped_all[i], (16, 16, 16), mode='trilinear') for i in range(B - primary_batch_size)]
+            mask_fine_reshaped = [self._interpolate(mask_fine[*i_fine_masked_cropped_all[b]], mask_coarse[*i_coarse_masked_cropped[i]].shape[2:], mode="nearest") for i in range(B - primary_batch_size)]
+            mask_fine_reshaped_down = self._interpolate(mask_fine[*i_fine_masked_cropped_all[b]], (16, 16, 16), mode="nearest")
+            mask_coarse_reshaped_down = [self._interpolate(mask_coarse[*i_coarse_masked_cropped[i]], (16, 16, 16), mode="nearest") for i in range(B - primary_batch_size)]
+
+            z_local_mix, mask_local_mix = [], []
+            for i in range(B - primary_batch_size):
+                z_fine_reshaped[:, :, mask_fine_reshaped_down[0, 0] == 0] = z_coarse_reshaped[i][:, :, mask_fine_reshaped_down[0, 0] == 0]
+                mask_fine_reshaped[i][:, :, mask_coarse[*i_coarse_masked_cropped[i]][0, 0] == 0] = 0
+                z_local_mix.append(z_fine_reshaped[i] * (1 - alpha) + z_coarse_reshaped[i] * alpha)
+                mask_local_mix.append(mask_fine_reshaped[i])
+            
+            i_local_mix, i_mix = [], i_coarse.clone()
+            for i in range(B - primary_batch_size): 
+                i_mix[*i_coarse_masked_cropped[i]] = self._interpolate(self.decode(z_local_mix[i], 
+                                                                                      self._interpolate(((mask_coarse_reshaped_down[i] > 0) | (mask_fine_reshaped_down > 0)).float(), (64, 64, 64), mode="nearest")),
+                                                                          mask_coarse[*i_coarse_masked_cropped[i]].shape[2:], mode="trilinear")
+                
+            for i in range(B - primary_batch_size): mask_coarse[i, *i_coarse_masked_cropped[i][1:]] = mask_local_mix[i]
+            mask_mix.append(self._interpolate(mask_coarse, cx.shape[2:], mode="trilinear").round())
+        
+        mask_mix = torch.cat(mask_mix, dim=0)
+        logs["image"] = logs["inputs"][:primary_batch_size] # fine image
+        logs["label"] = batch["fine"][:primary_batch_size].float() # fine label
+        logs["premix"] = logs["inputs"][primary_batch_size:] # coarse image
+        logs["premix_label"] = batch["coarse"][primary_batch_size:].float() # coarse label
+        logs["mixed_samples"] = i_mix  # mixed image
+        logs["mixed_fine"] = mask_mix      # mixed fine label
+        # logs["mixed_coarse"] = ((mask_mix > 0) | (cx[primary_batch_size:] > 0)).float()
+        logs["mix_log"] = ','.join(mix_log)
+        
+        if self.save_dataset:
+            primary_casename = batch.get("casename")[:primary_batch_size]
+            secondary_casename = batch.get("casename")[primary_batch_size:]
+            casenames = ['+'.join([p, s]) for p in primary_casename for s in secondary_casename]
+            mapping = {'+'.join([p, s]): {"samples": ip, "others": iis} for ip, p in enumerate(primary_casename) for iis, s in enumerate(secondary_casename)}
+            self.add(logs, 
+                     casenames, 
+                     dtypes={"mixed_fine": np.uint8, "mixed_coarse": np.uint8},
+                     b_mapping=mapping)
+        
+        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
+            metrics = self.log_eval(i_mix, i, log_group_metrics_in_2d)
+            # print(metrics)
+            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            return metrics, logs
+        
+        return None, logs
+    
 
 
 class InferSubclassSegmentation(EfficientSubclassSegmentation, MakeDataset):
@@ -779,3 +984,48 @@ class InferCharacteristicClassifier(CharacteristicClassifier, MakeDataset):
             self.add(logs, batch.get("casename"), dtypes={})
 
         return logs["metrics"], logs
+    
+
+class InferContDiffusion(ContrastiveDiffusion, ComputeMetrics, MakeDataset):
+    def __init__(self, 
+                 eval_scheme=[1],
+                 save_dataset=False,
+                 save_dataset_path=None,
+                 include_keys=["data", "text"],
+                 suffix_keys={"data":".nii.gz",},
+                 **diffusion_kwargs):
+        ContrastiveDiffusion.__init__(self, **diffusion_kwargs)
+        ComputeMetrics.__init__(self, eval_scheme)
+        self.save_dataset = save_dataset
+        if save_dataset:
+            assert exists(save_dataset_path)
+            MakeDataset.__init__(self, save_dataset_path, include_keys, suffix_keys)
+        self.eval()
+        
+    def test_step(self, *a):
+        pass
+    
+    def log_images(self, batch, split="train", log_metrics=False, log_group_metrics_in_2d=False, **kw):
+        logs = dict()
+        inputs = super(ContrastiveDiffusion, self).get_input(batch, self.first_stage_key)
+        mask = super(ContrastiveDiffusion, self).get_input(batch, "mask") # b c h w d
+        logs["inputs"] = inputs
+        logs["conditioning"] = mask
+        samples = torch.zeros_like(mask)
+        
+        for i in range(mask.shape[2]):
+            cond = torch.cat([mask[:, :, i], samples[:, :, max(0, i-1)]], dim=1)
+            log_ = super().log_images({self.first_stage_key: torch.randn_like(inputs[:, :, 0]),
+                                       self.cond_stage_key: cond}, **kw)
+            samples[:, :, i] = log_["samples"]
+        logs["samples"] = samples
+        
+        if self.save_dataset:
+            self.add({"samples": samples, "mask": mask}, batch.get("casename"), dtypes={"image": np.uint8})
+        
+        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
+            metrics = self.log_eval(inputs, samples, log_group_metrics_in_2d)
+            # print(metrics)
+            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            return metrics, logs
+        return None, logs

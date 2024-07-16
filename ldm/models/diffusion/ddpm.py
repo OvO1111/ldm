@@ -15,6 +15,7 @@ from einops import rearrange, repeat
 from contextlib import contextmanager
 from functools import partial
 from tqdm import tqdm
+from omegaconf.dictconfig import DictConfig
 from torchvision.utils import make_grid
 from pytorch_lightning.utilities.distributed import rank_zero_only
 
@@ -24,6 +25,7 @@ from ldm.modules.distributions.distributions import normal_kl, DiagonalGaussianD
 from ldm.models.autoencoder import VQModelInterface, IdentityFirstStage, AutoencoderKL
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
 from ldm.models.diffusion.ddim import DDIMSampler
+from ldm.data.utils import window_norm
 
 
 __conditioning_keys__ = {'concat': 'c_concat',
@@ -71,8 +73,12 @@ class DDPM(pl.LightningModule):
                  use_positional_encodings=False,
                  learn_logvar=False,
                  logvar_init=0.,
+                 use_window_norm=False,
+                 window_settings=[],
                  ):
         super().__init__()
+        self.use_window_norm = use_window_norm
+        self.window_settings = window_settings
         assert parameterization in ["eps", "x0"], 'currently only supporting "eps" and "x0"'
         self.parameterization = parameterization
         print(f"{self.__class__.__name__}: Running in {self.parameterization}-prediction mode")
@@ -84,7 +90,7 @@ class DDPM(pl.LightningModule):
         self.channels = channels
         self.use_positional_encodings = use_positional_encodings
         self.model = DiffusionWrapper(unet_config, conditioning_key)
-        self.dims = getattr(self.model, "dims", 3)
+        self.dims = getattr(self.model.diffusion_model, "dims", 3)
         count_params(self.model, verbose=True)
         self.use_ema = use_ema
         if self.use_ema:
@@ -183,6 +189,15 @@ class DDPM(pl.LightningModule):
                 self.model_ema.restore(self.model.parameters())
                 if context is not None:
                     print(f"{context}: Restored training weights")
+                    
+    def window_norm(self, x, y):
+        if self.use_window_norm:
+            xs, ys = [], []
+            for window_setting in self.window_settings:
+                xs.append(window_norm(x, *window_setting))
+                ys.append(window_norm(y, *window_setting))
+            x, y = map(lambda i: torch.cat(i, dim=0), [xs, ys])
+        return x, y
 
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
         sd = torch.load(path, map_location="cpu")
@@ -467,7 +482,7 @@ class LatentDiffusion(DDPM):
 
         self.restarted_from_ckpt = False
         if ckpt_path is not None:
-            self.init_from_ckpt(ckpt_path, ignore_keys)
+            self.init_from_ckpt(ckpt_path, ignore_keys, kwargs.get("load_only_unet", False))
             self.restarted_from_ckpt = True
             
         self.is_conditional_first_stage = False
@@ -676,6 +691,9 @@ class LatentDiffusion(DDPM):
                     xc = batch[cond_key]
                 elif cond_key == 'class_label':
                     xc = batch
+                elif isinstance(cond_key, (dict, DictConfig)):
+                    xc = {"c_crossattn": super(LatentDiffusion, self).get_input(batch, cond_key['crossattn']).to(self.device),
+                          "c_concat": super(LatentDiffusion, self).get_input(batch, cond_key['concat']).to(self.device) }
                 else:
                     xc = super().get_input(batch, cond_key).to(self.device)
             else:
@@ -689,7 +707,7 @@ class LatentDiffusion(DDPM):
             else:
                 c = xc
             if bs is not None:
-                c = c[:bs]
+                c = c[:bs] if not isinstance(c, dict) else {k: v[:bs] for k, v in c.items()}
 
             if self.use_positional_encodings:
                 pos_x, pos_y = self.compute_latent_shifts(batch)
@@ -1032,6 +1050,7 @@ class LatentDiffusion(DDPM):
         else:
             raise NotImplementedError()
 
+        model_output, target = self.window_norm(model_output, target)
         loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
@@ -1273,6 +1292,7 @@ class LatentDiffusion(DDPM):
         n_row = min(x.shape[0], n_row)
         log["inputs"] = x
         log["reconstruction"] = xrec
+        log['text'] = batch.get("prompt", "")
         if self.model.conditioning_key is not None:
             if hasattr(self.cond_stage_model, "decode"):
                 xc = self.cond_stage_model.decode(c)
@@ -1423,8 +1443,8 @@ class DiffusionWrapper(pl.LightningModule):
             cc = torch.cat(c_crossattn, 1)
             out = self.diffusion_model(x, t, context=cc)
         elif self.conditioning_key == 'hybrid':
-            xc = torch.cat([x] + c_concat, dim=1)
-            cc = torch.cat(c_crossattn, 1)
+            xc = torch.cat([x] + [c_concat], dim=1)
+            cc = torch.cat([c_crossattn], 1)
             out = self.diffusion_model(xc, t, context=cc)
         elif self.conditioning_key == 'adm':
             cc = c_crossattn[0]
@@ -1671,3 +1691,80 @@ class CoarseAndFineDiffusion(LatentDiffusion):
             logs["mix_log"] = ','.join(mix_log)
             
         return logs
+
+
+class ContrastiveDiffusion(LatentDiffusion):
+    def __init__(self, 
+                 contrastive_size=4,
+                 contrastive_loss_coef=.5,
+                 *a, **kw):
+        super().__init__(*a, **kw)
+        self.contrastive_size = contrastive_size
+        self.contrastive_loss_coef = contrastive_loss_coef
+        
+    def get_learned_conditioning(self, c):
+        if self.cond_stage_forward is None:
+            if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
+                c = self.cond_stage_model.encode(c)
+            else:
+                c = self.cond_stage_model(c)
+        else:
+            assert hasattr(self.cond_stage_model, self.cond_stage_forward)
+            c = getattr(self.cond_stage_model, self.cond_stage_forward)(c)
+        return c
+    
+    def contrastive_loss(self, anchor, pos, neg, margin=1.):
+        pos_similarity = (anchor * pos).sum(dim=-1).mean()
+        neg_similarity = (anchor * neg).sum(dim=-1).mean()
+        loss = nn.functional.relu(margin + pos_similarity - neg_similarity)
+        return loss
+        
+    def p_losses(self, x_start, cond, t, noise=None):
+        noise = [default(noise, lambda: torch.randn_like(x_start))[None] for _ in range(self.contrastive_size)]
+        x_noisy = [self.q_sample(x_start=x_start, t=t, noise=noise[_]) for _ in range(self.contrastive_size)]
+        noise = rearrange(torch.cat(noise), "n b c h w -> (b n) c h w")
+        x_noisy = rearrange(torch.cat(x_noisy), "n b c h w -> (b n) c h w")
+        t = repeat(t, "b -> (b n)", n=self.contrastive_size)
+        cond = repeat(cond, "b c h w -> (b n) c h w", n=self.contrastive_size)
+        
+        model_output = self.apply_model(x_noisy, t, cond)
+
+        loss_dict = {}
+        prefix = 'train' if self.training else 'val'
+        model_output_flat = rearrange(model_output, "(b n) c h w -> b n (c h w)", n=self.contrastive_size)
+        loss_contrastive = 0.
+        for cont in range(self.contrastive_size):
+            indices = [_ for _ in range(self.contrastive_size) if _ != cont]
+            loss_contrastive += self.contrastive_loss(model_output_flat[0:1, cont], 
+                                                      model_output_flat[0, indices], 
+                                                      model_output_flat[1:, cont])
+        loss_dict["contrastive"] = loss_contrastive / model_output.shape[0]
+
+        if self.parameterization == "x0":
+            target = x_start
+        elif self.parameterization == "eps":
+            target = noise
+        else:
+            raise NotImplementedError()
+
+        loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
+        loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
+
+        logvar_t = self.logvar.to(self.device)[t]
+        loss = loss_simple / torch.exp(logvar_t) + logvar_t
+        # loss = loss_simple / torch.exp(self.logvar) + self.logvar
+        if self.learn_logvar:
+            loss_dict.update({f'{prefix}/loss_gamma': loss.mean()})
+            loss_dict.update({'logvar': self.logvar.data.mean()})
+
+        loss = self.l_simple_weight * loss.mean()
+
+        loss_vlb = self.get_loss(model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
+        loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
+        loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
+        loss += (self.original_elbo_weight * loss_vlb)
+        loss_dict.update({f'{prefix}/loss': loss})
+        
+        loss += loss_contrastive / model_output.shape[0]
+
+        return loss, loss_dict

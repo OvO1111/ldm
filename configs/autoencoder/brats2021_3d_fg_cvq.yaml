@@ -1,35 +1,37 @@
 model:
-  base_learning_rate: 2e-5
+  base_learning_rate: 1e-4
   target: ldm.models.autoencoder.VQModel
   params:
     monitor: "val/rec_loss"
     image_key: image
-    embed_dim: 8
+    cond_key: coarse
+    embed_dim: 4
     n_embed: 8192
     dims: 3
-    use_window_norm: true  
+    is_conditional: true
     lossconfig:
       target: ldm.modules.losses.VQLPIPSWithDiscriminator
       params:
-        disc_start: 2001
+        disc_start: 50001
         disc_weight: 0.5
         n_classes: 8192  # =n_embed
-        gan_feat_weight: 1.
+        gan_feat_weight: 0.
         nframes_select: 1  # 1 as in medicaldiffusion
 
     ddconfig:
-      double_z: false
-      z_channels: 8
-      resolution: [128, 128, 128]
-      in_channels: 1
-      out_ch: 1
+      double_z: False
+      z_channels: 4
+      resolution: [64, 64, 64]
+      condition_channels: 1
+      in_channels: 4
+      out_ch: 4
       ch: 128
-      ch_mult: [ 1, 1, 1 ]  # num_down = len(ch_mult)-1
+      ch_mult: [ 1, 2, 4 ]  # num_down = len(ch_mult)-1
       num_res_blocks: 2
-      attn_resolutions: []
+      attn_resolutions: [4]
       dropout: 0.0
       dims: 3
-      attn_type: none
+      attn_type: vanilla
       use_checkpoint: True  # always use ckpt
 
 data:
@@ -39,16 +41,14 @@ data:
     num_workers: 2
     wrap: False
     train:
-      target: ldm.data.ensemble_v2.GatheredDatasetForGeneration
+      target: ldm.data.brats2021.BraTS2021_3DFG
       params:
         split: train
-        resize_to: [128, 128, 128]
+        crop_to: [64, 64, 64]
     validation:
-      target: ldm.data.ensemble_v2.GatheredDatasetForGeneration
+      target: ldm.data.brats2021.BraTS2021_3DFG
       params:
         split: val
-        resize_to: [128, 128, 128]
-        max_size: 200
 
 lightning:
   callbacks:
@@ -58,7 +58,6 @@ lightning:
       log_separate: false
       params:
         train_batch_frequency: 400
-        val_batch_frequency: 50
         max_images: 8
         logger:
           inputs: 

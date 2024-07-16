@@ -1,0 +1,61 @@
+model:
+  base_learning_rate: 1.e-2
+  target: ldm.models.downstream.segmentation.Segmentator
+  params:
+    image_key: "image"
+    seg_key: "mask"
+    monitor: val/loss
+    num_classes: 2
+    in_chns: 1
+    backbone_name: unetr
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 1
+    num_workers: 4
+    wrap: False
+    train:
+      target: ldm.data.base.MSDDataset
+      params:
+        split: train
+        resize_to: [128, 128, 128]
+    validation:
+      target: ldm.data.base.MSDDataset
+      params:
+        split: val
+        resize_to: [128, 128, 128]
+
+lightning:
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        train_batch_frequency: 100
+        val_batch_frequency: 20
+        max_images: 10
+        log_on_batch_idx: true
+        logger:
+          inputs: 
+            target: image_rescale
+          seg_fine:
+            target: mask_rescale
+            params: 
+              n_mask: 4
+          seg_coarse:
+            target: mask_rescale
+            params: 
+              n_mask: 2
+          gt_fine:
+            target: mask_rescale
+            params: 
+              n_mask: 4
+          gt_coarse:
+            target: mask_rescale
+            params: 
+              n_mask: 2
+
+  trainer:
+    benchmark: True
+    max_steps: 40000
+    replace_sampler_ddp: false

@@ -7,7 +7,7 @@ import torch
 from typing import List
 from datetime import datetime
 from functools import reduce
-from collections import defaultdict, namedtuple
+from collections import defaultdict, namedtuple, OrderedDict
 from collections.abc import MutableMapping
 
 
@@ -164,11 +164,11 @@ def check_validity(file_ls):
     return broken_ls
 
 
-def window_norm(image, window_pos=60, window_width=360):
-    window_min = window_pos - window_width // 2
+def window_norm(image, window_pos=60, window_width=360, out=(-1, 1)):
+    window_min = window_pos - window_width / 2
     image = (image - window_min) / window_width
-    image[image < 0] = 0
-    image[image > 1] = 1
+    image = (out[1] - out[0]) * image + out[0]
+    image = image.clamp(min=out[0], max=out[1])
     return image
 
 
@@ -185,7 +185,7 @@ def load_or_write_split(basefolder, force=False, **splits):
 
 
 class TorchioSequentialTransformer:
-    def __init__(self, d: MutableMapping, force_include=False):
+    def __init__(self, d: OrderedDict, force_include=False):
         self.transform_keys = d.keys()
         self.transforms = d.values()
         self.force_include = force_include
@@ -279,6 +279,6 @@ class TorchioForegroundCropper(tio.transforms.Transform):
             subject_ = {k: class_[k](tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
             
         return tio.Subject(subject_)
-            
-            
+
+
 
