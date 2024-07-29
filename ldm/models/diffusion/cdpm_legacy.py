@@ -133,21 +133,29 @@ class CategoricalDiffusion(pl.LightningModule):
                     print(f"{context}: Restored training weights")
                     
     def convert_legacy(self, state_dict):
-        state_dict = state_dict["model"]
-        
-        self.timesteps = len(state_dict["betas"])
-        self.betas = state_dict["betas"]
-        self.alphas = 1 - state_dict["betas"]
-        self.alphas_cumprod = state_dict["alphas_cumprod"]
-        self.alphas_cumprod_prev = state_dict["alphas_cumprod_prev"]
         
         convert_dict = dict()
         legacy_keys = list(state_dict.keys())
-        self_keys = list(self.model.state_dict().keys())
-        
-        for k in legacy_keys:
-            if k.startswith("unet"):
-                convert_dict[k.replace("unet", "model.diffusion_model")] = state_dict[k]
+        if "model" in state_dict:
+            self.timesteps = len(state_dict["betas"])
+            self.betas = state_dict["betas"]
+            self.alphas = 1 - state_dict["betas"]
+            self.alphas_cumprod = state_dict["alphas_cumprod"]
+            self.alphas_cumprod_prev = state_dict["alphas_cumprod_prev"]
+            
+            state_dict = state_dict["model"]
+            for k in legacy_keys:
+                if k.startswith("unet"):
+                    convert_dict[k.replace("unet", "model.diffusion_model")] = state_dict[k]
+        else:
+            self.timesteps = len(state_dict["diffusion.betas"])
+            self.betas = state_dict["diffusion.betas"]
+            self.alphas = 1 - state_dict["diffusion.betas"]
+            self.alphas_cumprod = state_dict["diffusion.cumalphas"]
+            self.alphas_cumprod_prev = state_dict["diffusion.cumalphas_prev"]
+            for k in legacy_keys:
+                if k.startswith("model"):
+                    convert_dict[k.replace("model", "model.diffusion_model")] = state_dict[k]
         return convert_dict
     
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False, use_legacy=False):
@@ -414,12 +422,13 @@ class CategoricalDiffusion(pl.LightningModule):
     @torch.no_grad()
     def p_sample(self, q_xT=None, c=None, verbose=False, 
                  plot_progressive_rows=False, 
-                 plot_denoising_rows=False, plot_diffusion_every_t=200):
+                 plot_denoising_rows=False, plot_diffusion_every_t=200, timesteps=None):
         logs = dict()
         with self.ema_scope():
             c = c if exists(c) else dict()
             p_xt, b = q_xT, q_xT.shape[0]
-            t_values = reversed(range(1, self.timesteps)) if not verbose else tqdm(reversed(range(1, self.timesteps)), total=self.timesteps - 1, desc="sampling progress")
+            if timesteps is None: timesteps = self.timesteps
+            t_values = reversed(range(1, timesteps)) if not verbose else tqdm(reversed(range(1, timesteps)), total=timesteps - 1, desc="sampling progress")
             
             if plot_denoising_rows: denoising_rows = []
             if plot_progressive_rows: progressive_rows = []

@@ -2,7 +2,7 @@ import os, os.path as path, pathlib as pb
 import json, torchio as tio, shutil, nibabel as nib
 import re, scipy.ndimage as ndimage, numpy as np
 
-import torch
+import torch, random
 
 from typing import List
 from datetime import datetime
@@ -240,6 +240,7 @@ class TorchioForegroundCropper(tio.transforms.Transform):
         if self.crop_level == "patch":
             image_ = subject_[self.crop_anchor]
             output_size = self.crop_kwargs["output_size"]
+            foreground_prob = self.crop_kwargs.get("foreground_prob", 0)
             
             pw = max((output_size[0] - image_.shape[1]) // 2 + 3, 0)
             ph = max((output_size[1] - image_.shape[2]) // 2 + 3, 0)
@@ -247,9 +248,20 @@ class TorchioForegroundCropper(tio.transforms.Transform):
             image_ = torch.nn.functional.pad(image_, (pd, pd, ph, ph, pw, pw), mode='constant', value=0)
 
             (c, w, h, d) = image_.shape
-            w1 = np.random.randint(0, w - output_size[0])
-            h1 = np.random.randint(0, h - output_size[1])
-            d1 = np.random.randint(0, d - output_size[2])
+            if random.random() < foreground_prob:
+                wl, wr = torch.where(torch.any(torch.any(image_, 2), 2))[0][[0, -1]]
+                hl, hr = torch.where(torch.any(torch.any(image_, 1), -1))[0][[0, -1]]
+                dl, dr = torch.where(torch.any(torch.any(image_, 1), 1))[0][[0, -1]]
+                if wl > w - output_size[0]: w1 = random.randint(0, w-output_size[0])
+                else: w1 = random.randint(wl, min(w - output_size[0], wr))
+                if hl > h - output_size[1]: h1 = random.randint(0, h-output_size[1])
+                else: h1 = random.randint(hl, min(w - output_size[1], hr))
+                if dl > d - output_size[2]: d1 = random.randint(0, d-output_size[2])
+                else: d1 = random.randint(dl, min(w - output_size[2], dr))
+            else:
+                w1 = np.random.randint(0, w - output_size[0])
+                h1 = np.random.randint(0, h - output_size[1])
+                d1 = np.random.randint(0, d - output_size[2])
             
             padder = identity if pw + ph + pd == 0 else lambda x: torch.nn.functional.pad(x, (pd, pd, ph, ph, pw, pw), mode='constant', value=0)
             cropper = [slice(w1, w1 + output_size[0]), slice(h1, h1 + output_size[1]), slice(d1, d1 + output_size[2])]

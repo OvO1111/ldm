@@ -7,7 +7,7 @@ model:
     monitor: val/loss
     num_classes: 2
     in_chns: 1
-    backbone_name: unetr
+    backbone_name: unet
 
 data:
   target: main.DataModuleFromConfig
@@ -19,12 +19,14 @@ data:
       target: ldm.data.base.MSDDataset
       params:
         split: train
-        resize_to: [128, 128, 128]
+        resize_to: null
+        name: msd_lung
     validation:
       target: ldm.data.base.MSDDataset
       params:
         split: val
-        resize_to: [128, 128, 128]
+        resize_to: null
+        name: msd_lung
 
 lightning:
   callbacks:

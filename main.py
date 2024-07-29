@@ -281,7 +281,7 @@ class SetupCallback(Callback):
                 os.makedirs(os.path.split(dst)[0], exist_ok=True)
                 try:
                     shutil.copytree(self.logdir, dst)
-                    shutil.rmtree(self.logdir)
+                    shutil.rmtree(self.logdir, ignore_errors=1)
                     ckptdir = os.path.join(self.logdir, "checkpoints")
                     cfgdir = os.path.join(self.logdir, "configs")
                     os.makedirs(ckptdir, exist_ok=True)
@@ -546,11 +546,11 @@ if __name__ == "__main__":
             "wandb": {
                 "target": "pytorch_lightning.loggers.WandbLogger",
                 "params": {
-                    'project': nowname.replace("/", "_"),
-                    "name": datetime.datetime.now().strftime("%Y%m%d-%H%M%S"),
+                    'project': "ldm",
+                    "name": nowname.replace("/", "_"),
                     "save_dir": logdir,
                     "offline": opt.debug,
-                    "id": nowname.replace("/", "_"),
+                    "id": datetime.datetime.now().strftime("%Y%m%d-%H%M%S"),
                 }
             },
             "tensorboard": {

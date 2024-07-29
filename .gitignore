@@ -1,5 +1,6 @@
 # ignore dependent ckpts 
-dependency/*.pth
+dependency/*
+compr
 
 # ignore slurm runs
 run/

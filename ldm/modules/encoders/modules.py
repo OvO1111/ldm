@@ -7,6 +7,7 @@ import numpy as np
 # import clip
 # import kornia
 
+from ldm.util import instantiate_from_config
 from transformers import AutoTokenizer, AutoModel
 from ldm.modules.x_transformer import Encoder, TransformerWrapper  # TODO: can we directly rely on lucidrains code and simply add this as a reuirement? --> test
 
@@ -370,5 +371,29 @@ class FrozenBERTEmbedder(AbstractEncoder):
 
 
 class IdentityEncoder(nn.Module):
-    def encode(self, tensor):
-        return tensor
+    def __init__(self, output_size=None, output_dtype=torch.float32):
+        self.output_size = output_size
+        self.dtype = output_dtype
+    
+    def encode(self, tensor: torch.Tensor):
+        if self.output_size is None:
+            return tensor
+        dtype = tensor.dtype
+        if self.dtype == torch.float32:
+            return nn.functional.interpolate(tensor.float(), self.output_size, mode='trilinear' if tensor.ndim == 5 else 'bilinear').to(dtype)
+        return nn.functional.interpolate(tensor.long(), self.output_size, mode='nearest').to(dtype)
+    
+    
+class HybridConditionEncoder(nn.Module):
+    def __init__(self, crossattn_module, concat_module):
+        super().__init__()
+        self.crossattn_module = instantiate_from_config(crossattn_module)
+        self.concat_module = instantiate_from_config(concat_module)
+        
+    def encode(self, x: dict):
+        crossattn = self.crossattn_module(x['c_crossattn'])
+        cat = self.concat_module(x['c_concat'])
+        return {'c_crossattn': crossattn, 'c_concat': cat}
+    
+    def decode(self, x):
+        return x

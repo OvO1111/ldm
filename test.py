@@ -8,6 +8,7 @@ import pytorch_lightning as pl
 
 from omegaconf import OmegaConf
 from functools import partial
+from itertools import cycle
 from queue import Queue
 from torch.utils.data import _utils
 
@@ -76,7 +77,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
                                   num_workers=self.num_workers, worker_init_fn=init_fn, shuffle=shuffle, drop_last=False, 
                                   collate_fn=getattr(self.datasets["test"], "collate", _utils.collate.default_collate))
         if not has_batch_sampler: return test_dataloader(batch_size=self.batch_size)
-        else: return test_dataloader(batch_sampler=self.batch_sampler, sampler=None)
+        else: return cycle(test_dataloader(batch_sampler=self.batch_sampler, sampler=None))
 
     def _predict_dataloader(self, shuffle=False):
         return self._test_dataloader(shuffle)

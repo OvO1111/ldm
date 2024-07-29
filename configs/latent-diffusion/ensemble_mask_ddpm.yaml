@@ -9,7 +9,7 @@ model:
     timesteps: 1000
     first_stage_key: mask
     conditioning_key: hybrid
-    cond_stage_key: 
+    cond_stage_key:
       crossattn: prompt_context
       concat: totalseg
     image_size: [128, 128, 128]  # after first-stage encoding
@@ -29,6 +29,8 @@ model:
         channel_mult: [1, 2, 4, 4, 8]
         num_head_channels: 32
         use_checkpoint: true  # always use ckpt
+        use_spatial_transformer: true
+        context_dim: 768
 
     first_stage_config: 
       target: ldm.modules.encoders.modules.IdentityFirstStage
@@ -42,12 +44,12 @@ data:
     num_workers: 1
     wrap: False
     train:
-      target: ldm.data.ensemble_v2.GatheredDatasetForGeneration
+      target: ldm.data.ensemble_v2.GatheredDatasetForMaskGeneration
       params:
         split: train
         resize_to: [128, 128, 128]
     validation:
-      target: ldm.data.ensemble_v2.GatheredDatasetForGeneration
+      target: ldm.data.ensemble_v2.GatheredDatasetForMaskGeneration
       params:
         split: val
         resize_to: [128, 128, 128]
@@ -64,17 +66,9 @@ lightning:
         clamp: false
         logger:
           inputs: 
-            target: mask_rescale
-            params:
-              n_mask: 1
-          conditioning:
-            target: mask_rescale
-            params: 
-              n_mask: 20
+            target: image_rescale
           samples:
-            target: mask_rescale
-            params:
-              n_mask: 1
+            target: image_rescale
 
   trainer:
     benchmark: True

@@ -184,6 +184,7 @@ def visualize(image: torch.Tensor, n_mask: int=20, num_images=8, is_mask=False):
     if is_mask:
         cmap = get_cmap("viridis")
         rgb = torch.tensor([(0, 0, 0)] + [cmap(i)[:-1] for i in (n_mask - np.arange(0., n_mask)) / n_mask], device=image.device)
+        image = image.long().clip(0, n_mask)
         colored_mask = rearrange(rgb[image.long()][0], "i j n -> 1 n i j")
         return colored_mask.squeeze().data.cpu().numpy()
     else:

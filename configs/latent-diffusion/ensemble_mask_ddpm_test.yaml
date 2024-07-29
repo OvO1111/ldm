@@ -1,0 +1,93 @@
+model:
+  base_learning_rate: 1.0e-4
+  target: inference.models.InferLatentDiffusion
+  params:
+    linear_start: 0.0015
+    linear_end: 0.0195
+    num_timesteps_cond: 1
+    log_every_t: 200
+    timesteps: 1000
+    first_stage_key: totalseg
+    conditioning_key: crossattn
+    cond_stage_key: prompt_context
+      # crossattn: prompt_context
+      # concat: totalseg
+    image_size: [128, 128, 128]  # after first-stage encoding
+    channels: 1  # after first-stage encoding
+    monitor: val/loss_simple_ema
+    cond_stage_trainable: false
+    ckpt_path: /ailab/user/dailinrui/data/ldm/ensemble_anatomical_ddpm_128_128_128/checkpoints/last.ckpt
+
+    unet_config:
+      target: ldm.modules.diffusionmodules.openaimodel.UNetModel
+      params:
+        image_size: 128  # not used
+        in_channels: 1
+        out_channels: 1
+        model_channels: 32
+        attention_resolutions: [16, 8]
+        num_res_blocks: 2
+        channel_mult: [1, 2, 4, 4, 8]
+        num_head_channels: 32
+        use_checkpoint: true  # always use ckpt
+
+    first_stage_config: 
+      target: ldm.modules.encoders.modules.IdentityFirstStage
+
+    cond_stage_config:
+      target: ldm.modules.encoders.modules.HybridConditionEncoder
+      params:
+        concat_module:
+          target: ldm.modules.diffusionmodules.model.Encoder
+          params:
+            double_z: false
+            z_channels: 4
+            resolution: [128, 128, 128]
+            in_channels: 2
+            ch: 64
+            out_ch: 1
+            ch_mult: [1,1,1]  # num_down = len(ch_mult)-1
+            num_res_blocks: 1
+            dropout: 0.0
+            attn_resolutions: []  # on z axis, starting with 12->24->48 for len(ch_mult)==4 and resolution==96
+            attn_type: none
+        crossattn_module:
+          target: torch.nn.Identity
+
+    save_dataset: true 
+    save_dataset_path: /ailab/user/dailinrui/data/ldm/ensemble_anatomical_ddpm_128_128_128/dataset
+    include_keys: [samples]
+    suffix_keys: 
+      samples: .nii.gz
+
+data:
+  target: test.DataModuleFromConfig
+  params:
+    batch_size: 1
+    num_workers: 4
+    wrap: False
+    test:
+      target: ldm.data.ensemble_v2.GatheredDatasetForMaskGeneration
+      params:
+        split: val
+        resize_to: [128, 128, 128]
+
+lightning:
+  callbacks:
+    image_logger:
+      target: test.ImageLogger
+      params:
+        test_batch_frequency: 1
+        max_images: 10 
+        # log_images_kwargs:
+        #   ddim_steps: null 
+        clamp: false
+        logger:
+          inputs: 
+            target: image_rescale
+          samples:
+            target: image_rescale
+
+  trainer:
+    benchmark: True
+    limit_test_batches: 500

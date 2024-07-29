@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 1.e-4
+  base_learning_rate: 1.e-3
   target: ldm.models.diffusion.classifier.CharacteristicClassifier
   params:
     data_key: image
@@ -55,7 +55,7 @@ model:
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 2
+    batch_size: 4
     num_workers: 8
     wrap: False
     train:

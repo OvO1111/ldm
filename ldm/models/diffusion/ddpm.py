@@ -348,7 +348,8 @@ class DDPM(pl.LightningModule):
         # if len(x.shape) == 3:
         #     x = x[:, None]
         # x = rearrange(x, 'b h w c -> b c h w')
-        x = x.to(memory_format=torch.contiguous_format).float()
+        if isinstance(x, torch.Tensor):
+            x = x.to(memory_format=torch.contiguous_format).float().to(self.device)
         return x
 
     def shared_step(self, batch):
@@ -692,8 +693,8 @@ class LatentDiffusion(DDPM):
                 elif cond_key == 'class_label':
                     xc = batch
                 elif isinstance(cond_key, (dict, DictConfig)):
-                    xc = {"c_crossattn": super(LatentDiffusion, self).get_input(batch, cond_key['crossattn']).to(self.device),
-                          "c_concat": super(LatentDiffusion, self).get_input(batch, cond_key['concat']).to(self.device) }
+                    xc = {"c_crossattn": super(LatentDiffusion, self).get_input(batch, cond_key['crossattn']),
+                          "c_concat": super(LatentDiffusion, self).get_input(batch, cond_key['concat']) }
                 else:
                     xc = super().get_input(batch, cond_key).to(self.device)
             else:
@@ -1292,7 +1293,7 @@ class LatentDiffusion(DDPM):
         n_row = min(x.shape[0], n_row)
         log["inputs"] = x
         log["reconstruction"] = xrec
-        log['text'] = batch.get("prompt", "")
+        # log['text'] = batch.get("prompt", "")
         if self.model.conditioning_key is not None:
             if hasattr(self.cond_stage_model, "decode"):
                 xc = self.cond_stage_model.decode(c)

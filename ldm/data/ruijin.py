@@ -20,7 +20,7 @@ class Ruijin_3D(Dataset):
                 use_summary_level="short",
                 text_encoder="CT_report_abstract_BLS_PULSE-20bv5_short"):
         super().__init__()
-        with open('/ailab/user/dailinrui/data/records/dataset_crc_v2.json', 'rt') as f:
+        with open('/ailab/user/dailinrui/data/records/dataset_crc_v3.json', 'rt') as f:
             self.data = json.load(f)
             self.data_keys = list(self.data.keys())
             self.data_keys.remove("RJ202302171638326937")
@@ -112,10 +112,10 @@ class Ruijin_3D(Dataset):
         
         subject = tio.Subject(image=tio.ScalarImage(tensor=image[None], spacing=spacing), mask=tio.LabelMap(tensor=mask[None], spacing=spacing),)
         # resize based on spacing
+        ori_size = subject.image.data.shape
         subject = self.transforms["resize_base"](subject)
         # crop
         subject = self.transforms["crop"](subject)
-        ori_size = subject.image.data.shape
         # normalize
         subject = self.transforms["normalize_image"](subject)
         # subject = self.transforms["normalize_mask"](subject)

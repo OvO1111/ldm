@@ -15,7 +15,8 @@ import torchmetrics.classification
 
 from ldm.modules.encoders.modules import TransformerEmbedder
 from ldm.modules.diffusionmodules.model import Encoder
-from ldm.modules.diffusionmodules.openaimodel import EncoderUNetModel, UNetModel
+from collections import OrderedDict
+from ldm.modules.diffusionmodules.openaimodel import EncoderUNetModel
 from ldm.util import log_txt_as_img, default, ismap, instantiate_from_config
 
 __models__ = {
@@ -302,8 +303,9 @@ class CharacteristicClassifier(pl.LightningModule):
             for p in self.encoder.parameters():
                 p.detach_().requires_grad_(False)
         self.is_conditional = self.cond_key is not None
+        self.automatic_optimization = False
         
-        self.classifiers = torch.nn.ModuleDict()
+        self.classifiers = OrderedDict()
         conv_nd = getattr(torch.nn, f"Conv{self.dims}d", torch.nn.Identity)
         batchnorm_nd = getattr(torch.nn, f"BatchNorm{self.dims}d", torch.nn.Identity)
         if activation == "relu":
@@ -317,10 +319,12 @@ class CharacteristicClassifier(pl.LightningModule):
             classifier.append(feature_encoder)
             classifier.append(torch.nn.Linear(network_out, num_feature_classes[key]))
             self.classifiers[key] = classifier
+        self.classifiers = torch.nn.ModuleDict(self.classifiers)
         
         if ckpt_path is not None: self.init_from_ckpt(ckpt_path, ignore_keys, only_load_encoder)
         self.accuracy = {key: torchmetrics.classification.Accuracy(task="multiclass", num_classes=num_feature_classes[key]) for key in self.feature_key}
-        # self.auroc = {key: torchmetrics.classification.AUROC(task="multiclass", num_classes=num_feature_classes[key]) for key in self.feature_key}
+        self.auroc = {key: torchmetrics.classification.AUROC(task="multiclass", num_classes=num_feature_classes[key]) for key in self.feature_key}
+        self.f1 = {key: torchmetrics.classification.F1Score(task="multiclass", num_classes=num_feature_classes[key]) for key in self.feature_key}
         
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
         sd = torch.load(path, map_location="cpu")
@@ -362,7 +366,8 @@ class CharacteristicClassifier(pl.LightningModule):
     def on_fit_start(self, **kw):
         for metric_key in self.accuracy.keys():
             self.accuracy[metric_key] = self.accuracy[metric_key].to(self.device)
-            # self.auroc[metric_key] = self.auroc[metric_key].to(self.device)
+            self.auroc[metric_key] = self.auroc[metric_key].to(self.device)
+            self.f1[metric_key] = self.f1[metric_key].to(self.device)
 
     def shared_step(self, batch):
         image = self.get_input(batch, self.data_key)
@@ -381,17 +386,28 @@ class CharacteristicClassifier(pl.LightningModule):
         loss_log = {}
         metric_log = {}
         log_prefix = "train" if self.training else "val"
-        for k, classifier in self.classifiers.items():
+        for ik, (k, classifier) in enumerate(self.classifiers.items()):
             feat = feature[k]
-            is_valid = (feature[k][:, 0].sum(0, keepdim=True) == 0) * 1.
+            is_valid = (feature[k][:, 0] == 0) * 1.
             preds = classifier[0](model_outputs)
             preds = classifier[1](preds.view(image.shape[0], -1))
-            loss = torch.nn.functional.cross_entropy(preds, feat.float())
-            loss_all += loss * is_valid
+            loss = (torch.nn.functional.cross_entropy(preds, feat.float(), reduction='none') * is_valid).mean()
+            loss_all += loss
             loss_log[f"{log_prefix}/valid_{k}"] = is_valid.sum() / is_valid.numel()
-            loss_log[f"{log_prefix}/loss_{k}"] = loss.item() * is_valid
-            metric_log[f"{log_prefix}/acc_{k}"] = self.accuracy[k](preds, feat.argmax(1)).item()
-            # metric_log[f"{log_prefix}/auroc_{k}"] = self.auroc[k](preds, feat.argmax(1))
+            loss_log[f"{log_prefix}/loss_{k}"] = loss
+            metric_log[f"{log_prefix}/acc_{k}"] = self.accuracy[k](preds, feat.argmax(1))
+            metric_log[f"{log_prefix}/f1_{k}"] = self.f1[k](preds, feat.argmax(1))
+            metric_log[f"{log_prefix}/auroc_{k}"] = self.auroc[k](preds, feat.argmax(1))
+            
+            # grad
+            if self.training:
+                optimizer = self.optimizers()[ik]
+                scheduler = self.lr_schedulers()[ik]
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+            
             
         self.log(f"{log_prefix}/loss", loss_all, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=1)
         self.log('global_step', self.global_step, logger=False, on_epoch=False, prog_bar=True, on_step=True, sync_dist=1)
@@ -438,20 +454,11 @@ class CharacteristicClassifier(pl.LightningModule):
         logs["metrics"] = str(metric_log)
         return logs
     
-    def optimizer_step(self, epoch_nb, batch_nb, optimizer, optimizer_idx, optimizer_closure, **kw):
-        optimizer.step(optimizer_closure)
-        optimizer.zero_grad()
-        if epoch_nb > 0 and batch_nb == 0:
-            self.lr_schedulers().step()
-    
     def configure_optimizers(self):
-        param = list(self.classifiers.parameters())
-        if self.training_encoder:
-            param += list(self.encoder.parameters())
-        optimizer = AdamW(param, lr=self.learning_rate)
-        scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, 
-                                                      start_factor=1, 
-                                                      end_factor=0, 
-                                                      total_iters=self.trainer.max_epochs)
-        return [optimizer], [scheduler]
+        optimizer_list = []
+        scheduler_list = []
+        for k in self.classifiers.keys():
+            optimizer_list.append(AdamW(self.classifiers[k].parameters(), lr=self.learning_rate))
+            scheduler_list.append(torch.optim.lr_scheduler.LinearLR(optimizer_list[-1], start_factor=1, end_factor=0.001, total_iters=40000))
+        return optimizer_list, scheduler_list
         

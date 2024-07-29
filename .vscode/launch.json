@@ -25,7 +25,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/latent-diffusion/ensemble_tumor_mask.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
+            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {
@@ -33,7 +33,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./test.py",
-            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm_test.yaml", "--gpus", "0,", "--name", "test", "--debug"],
+            "args": ["-b", "./configs/latent-diffusion/guidegen_ldm_test.yaml", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {
@@ -49,7 +49,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./test.py",
-            "args": ["-b", "./configs/categorical-diffusion/ensemble_cdm_test.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
+            "args": ["-b", "./configs/categorical-diffusion/guidegen_cdm_test.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {

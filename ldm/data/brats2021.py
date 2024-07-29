@@ -6,7 +6,7 @@ import h5py, numpy as np
 import torch
 from tqdm import tqdm
 from torch.utils.data import Dataset, _utils
-
+from einops import rearrange
 from ldm.data.utils import identity, TorchioForegroundCropper
 
 
@@ -30,7 +30,7 @@ class BraTS2021_3D(Dataset):
         self.transforms = dict(
             crop=TorchioForegroundCropper(crop_level="patch", 
                                           crop_anchor="image",
-                                          crop_kwargs=dict(output_size=crop_to),) if crop_to is not None else identity,
+                                          crop_kwargs=dict(output_size=crop_to, foreground_prob=1.),) if crop_to is not None else identity,
             normalize_image=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=None, include=["image"]),
             normalize_mask=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(0, 3), include=["mask"])
         )
@@ -70,6 +70,9 @@ class BraTS2021_3D(Dataset):
         subject = {k: v.data for k, v in subject.items()} | {"ids": idx, 
                                                              "mask": subject.fine.data if idx in self.fine_labeled_indices else subject.coarse.data, 
                                                              'casename': os.path.basename(self.split_keys[idx]).split('.')[0]}
+        subject = subject | {'cond': torch.cat([subject['coarse'], subject['mask']])}
+        subject = subject | {"cond_onehot": torch.cat([subject['coarse'],
+                                                       rearrange(torch.nn.functional.one_hot(subject['mask'], 4), '1 ... n -> n ...')[1:] if idx in self.fine_labeled_indices else torch.zeros((3,) + subject['coarse'].shape[1:])], dim=0)}
 
         return subject
         

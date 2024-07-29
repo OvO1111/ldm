@@ -1,20 +1,20 @@
 model:
-  base_learning_rate: 2e-5
+  base_learning_rate: 1e-4
   target: ldm.models.autoencoder.VQModel
   params:
     monitor: "val/rec_loss"
-    image_key: image
+    image_key: mask
     embed_dim: 8
     n_embed: 8192
     dims: 3
-    use_window_norm: true  
+    use_window_norm: false  
     lossconfig:
       target: ldm.modules.losses.VQLPIPSWithDiscriminator
       params:
         disc_start: 20001
         disc_weight: 0.5
         n_classes: 8192  # =n_embed
-        gan_feat_weight: 1.
+        gan_feat_weight: 0.
         nframes_select: 1  # 1 as in medicaldiffusion
 
     ddconfig:
@@ -23,20 +23,19 @@ model:
       resolution: [128, 128, 128]
       in_channels: 1
       out_ch: 1
-      ch: 128
+      ch: 32
       ch_mult: [ 1, 1, 1 ]  # num_down = len(ch_mult)-1
       num_res_blocks: 2
       attn_resolutions: []
       dropout: 0.0
       dims: 3
       attn_type: none
-      use_checkpoint: True  # always use ckpt
 
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 1
-    num_workers: 2
+    batch_size: 3
+    num_workers: 8
     wrap: False
     train:
       target: ldm.data.ensemble_v2.GatheredDatasetForGeneration
@@ -62,11 +61,17 @@ lightning:
         max_images: 8
         logger:
           inputs: 
-            target: image_rescale
+            target: mask_rescale
+            params:
+              n_mask: 2
           reconstruction:
-            target: image_rescale
+            target: mask_rescale
+            params:
+              n_mask: 2
           samples:
-            target: image_rescale
+            target: mask_rescale
+            params:
+              n_mask: 2
 
   trainer:
     benchmark: True

@@ -124,10 +124,10 @@ class RuijinForEnsemble(Dataset):
                               mask=tio.LabelMap(tensor=crcmask[None], spacing=spacing),
                               totalseg=tio.LabelMap(tensor=mask[None], spacing=spacing))
         # resize based on spacing
+        ori_size = subject.image.data.shape
         subject = self.transforms["resize_base"](subject)
         # crop
         subject = self.transforms["crop"](subject)
-        ori_size = subject.image.data.shape
         # normalize
         subject = self.transforms["normalize_image"](subject)
         # resize
@@ -477,7 +477,7 @@ class GatheredEnsembleDataset(Dataset):
                  split="train", 
                  resize_to=(128,128,128), 
                  max_size=None,
-                 disable_aug=False):
+                 disable_aug=True):
         self.transforms = TorchioSequentialTransformer({
             "crop": TorchioForegroundCropper(crop_level="mask_foreground", 
                                              crop_anchor="totalseg",
@@ -558,11 +558,12 @@ def group_ensemble_dataset(save_dir="/ailab/user/dailinrui/data/datasets/ensembl
         for i in tqdm(cases):
             i = int(i)
             name = f"EnsembleV2{split}_{i:05d}.h5"
-            if (pb.Path(save_dir) / split / name).exists(): continue
+            # if (pb.Path(save_dir) / split / name).exists(): continue
             sample = datasets[0][i] if i < len(datasets[0]) else datasets[1][i - len(datasets[0])]
             if sample['mask'].sum() == 0: 
                 print(f"no valid predicted mask in sample {sample['casename']}")
                 continue
+            assert sample['mask'].max() == 1, f"mask has more than one value {sample['mask'].max()}"
             h5 = h5py.File(pb.Path(save_dir) / split / name, mode='w')
             for k, v in sample.items():
                 if isinstance(v, str): 
@@ -589,8 +590,21 @@ def group_ensemble_dataset(save_dir="/ailab/user/dailinrui/data/datasets/ensembl
             ds.broadcast(nullify_transforms)
             
         # last = max(int(x.split('_')[-1].split('.')[0]) for x in os.listdir(pb.Path(save_dir) / "train"))
-        cases = [int(_.split("_")[-1].split('.')[0]) for _ in os.listdir(pb.Path(save_dir) / "train_v2")]
+        # cases = [int(_.split("_")[-1].split('.')[0]) for _ in os.listdir(pb.Path(save_dir) / "train_v2")]
+        cases = list(range(len(dataset)))
+        # cases = [2577, 2955]
         process(cases, 'train', dataset)
+        
+        bad_cases = []
+        for sample in tqdm(list(pb.Path("/ailab/user/dailinrui/data/datasets/ensemble/train").iterdir())):
+            h5 = h5py.File(sample)
+            check = h5['image'].shape == h5['totalseg'].shape
+            check = check & (h5['image'].shape == h5['mask'].shape)
+            if not check:
+                bad_cases.append(int(sample.name.split('_')[-1].split('.')[0]))
+                print(sample)
+                
+        process(bad_cases, 'train', dataset)
         # pool = []
         # nproc = 2
         # for p in range(nproc):
@@ -604,15 +618,27 @@ def group_ensemble_dataset(save_dir="/ailab/user/dailinrui/data/datasets/ensembl
         collect_garbage()
         dataset1 = EnsembleDatasetV2(split="val", use_tcia=1, use_ruijin=1, use_msd=1, include_ds=include_ds)
         dataset2 = EnsembleDatasetV2(split="test", use_tcia=0, use_ruijin=1, use_msd=0, include_ds=include_ds)
-        total_len = len(dataset1.split_keys) + len(dataset2)
+        total_len = len(dataset1) + len(dataset2)
         for ds in dataset1.ds:
             ds.broadcast(nullify_transforms)
         for ds in dataset2.ds:
             ds.broadcast(nullify_transforms)
         
         # last = max(int(x.split('_')[-1].split('.')[0]) for x in os.listdir(pb.Path(save_dir) / "val"))
-        cases = [int(_.split("_")[-1].split('.')[0]) for _ in os.listdir(pb.Path(save_dir) / "val_v2")]
+        # cases = [int(_.split("_")[-1].split('.')[0]) for _ in os.listdir(pb.Path(save_dir) / "val_v2")]
+        cases = list(range(total_len))
         process(cases, 'val', dataset1, dataset2)
+        
+        bad_cases = []
+        for sample in tqdm(list(pb.Path("/ailab/user/dailinrui/data/datasets/ensemble/val").iterdir())):
+            h5 = h5py.File(sample)
+            check = h5['image'].shape == h5['totalseg'].shape
+            check = check & (h5['image'].shape == h5['mask'].shape)
+            if not check:
+                bad_cases.append(int(sample.name.split('_')[-1].split('.')[0]))
+                print(sample)
+                
+        process(bad_cases, 'val', dataset)
         # pool = []
         # nproc = 2
         # for p in range(nproc):
@@ -624,4 +650,5 @@ def group_ensemble_dataset(save_dir="/ailab/user/dailinrui/data/datasets/ensembl
     
 
 if __name__ == "__main__": 
-    group_ensemble_dataset(split="val")
+    # group_ensemble_dataset(split="val")
+    pass

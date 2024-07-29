@@ -1,0 +1,122 @@
+model:
+  base_learning_rate: 2e-5
+  target: inference.models.InferCategoricalDiffusion
+  params:
+    # diffusion kwargs
+    linear_start: 1e-2
+    linear_end: 0.2
+    log_every_t: 200
+    timesteps: 1000
+    num_classes: 20  # include background class
+    data_key: totalseg
+    cond_key: prompt_context
+    noise_type: categorical
+    conditioning_key: crossattn
+    monitor: val/loss
+    cond_stage_trainable: false
+    use_scheduler: true 
+    scheduler_config:
+      target: torch.optim.lr_scheduler.LinearLR
+      params:
+        start_factor: 1
+        end_factor: 1e-3
+        total_iters: 500
+    use_automatic_optimization: false
+
+    # whether use legacy
+    use_legacy: true 
+    parameterization: kl 
+    ckpt_path: /ailab/user/dailinrui/data/ccdm_pl/ensemblev2_128_128_128_anatomical/checkpoints/last-v3.ckpt
+
+    # make dataset
+    save_dataset: true 
+    save_dataset_path: /ailab/user/dailinrui/data/ccdm_pl/ensemblev2_128_128_128_anatomical/dataset
+    include_keys: [inputs, samples]
+    suffix_keys: 
+      inputs: .nii.gz
+      samples: .nii.gz
+
+    unet_config:
+      target: ldm.modules.diffusionmodules.openaimodel.CCDMUNetModel
+      params:
+        in_channels: 20
+        out_channels: 20
+        model_channels: 64
+        num_res_blocks: 1
+        cond_encoded_shape: null
+        num_heads: 1
+        num_head_channels: 64
+        channel_mult:
+        - 1
+        - 1
+        - 2
+        - 2
+        - 4
+        attention_resolutions:
+        - 8
+        - 16
+        use_checkpoint: true
+        dims: 3
+        use_spatial_transformer: true
+        transformer_depth: 1
+        context_dim: 768
+        ce_head: false
+        softmax_output: true
+        image_size:
+        - 128
+        - 128
+        - 128
+
+    cond_stage_config: 
+      target: torch.nn.Identity
+
+    loss_config:
+      # ce_loss:
+      #   coeff: 10
+      kl_div:
+        coeff: 1
+      dir_loss:
+        coeff: 1
+
+data:
+  target: test.DataModuleFromConfig
+  params:
+    batch_size: 1
+    num_workers: 2
+    wrap: false
+    test:
+      target: ldm.data.ensemble_v2.GatheredDatasetForMaskGeneration
+      params:
+        split: val
+        max_size: null
+        resize_to:
+        - 128
+        - 128
+        - 128
+
+lightning:
+  callbacks:
+    image_logger:
+      target: test.ImageLogger
+      params:
+        test_batch_frequency: 1
+        max_images: 10
+        log_images_kwargs:
+          ddim_steps: null
+        logger:
+          inputs: 
+            target: mask_rescale
+            params: 
+              n_mask: 20
+          noise:
+            target: mask_rescale
+            params: 
+              n_mask: 20
+          samples:
+            target: mask_rescale
+            params: 
+              n_mask: 20
+
+  trainer:
+    benchmark: True
+    limit_test_batches: 500

@@ -17,7 +17,7 @@ from ldm.data.utils import load_or_write_split
 from ldm.util import instantiate_from_config
 from ldm.models.autoencoder import AutoencoderKL, VQModelInterface
 from ldm.models.diffusion.ddpm import LatentDiffusion, ContrastiveDiffusion
-from ldm.models.diffusion.ccdm import CategoricalDiffusion, OneHotCategoricalBCHW
+from ldm.models.diffusion.cdpm_legacy import CategoricalDiffusion, OneHotCategoricalBCHW
 from ldm.models.diffusion.classifier import CharacteristicClassifier
 from ldm.models.downstream.efficient_subclass import EfficientSubclassSegmentation
 
@@ -159,7 +159,6 @@ class MakeDataset:
         self.create_split = create_split
         
         self.dataset = dict()
-        for key in suffixes.keys(): os.makedirs(os.path.join(self.base, key), exist_ok=True)
         
     def add(self, samples, sample_names=None, dtypes={}):
         if not exists(sample_names): sample_names = [f"case_{len(self.dataset) + i}" for i in range(self.bs)]
@@ -170,17 +169,30 @@ class MakeDataset:
         
         for key in self.include_keys:
             value = samples[key]
-            for b in range(len(samples[key])):
-                value_b = value[b]
+            for b in range(self.bs):
                 sample_name_b = sample_names[b]
-                if isinstance(value_b, torch.Tensor):
-                    f = os.path.join(self.base, key, sample_name_b + self.suffixes[key])
-                    im = value_b.cpu().data.numpy().astype(dtypes.get(key, np.float32))
-                    assert im.ndim == self.dims + 1, f"desired ndim {self.dims} and actual ndim {im.shape} not match"
-                    sitk.WriteImage(sitk.GetImageFromArray(rearrange(self.postprocess(im), "c ... -> ... c")), f)
-                    self.dataset[sample_name_b][key] = f
-                else:
-                    self.dataset[sample_name_b][key] = value_b
+                if not isinstance(value, dict):
+                    value = {"value": value}
+                for k, v in value.items():
+                    value_b = v[b]
+                    k = "_".join([key, k])
+                    if isinstance(value_b, torch.Tensor):
+                        f = "not saved"
+                        suffix = self.suffixes.get(key, self.suffixes.get(k, ""))
+                        if suffix == '.nii.gz':
+                            f = os.path.join(self.base, k, sample_name_b + suffix)
+                            im = value_b.cpu().data.numpy().astype(dtypes.get(key, np.float32))
+                            assert im.ndim == self.dims + 1, f"desired ndim {self.dims} and actual ndim {im.shape} not match"
+                            os.makedirs(os.path.dirname(f), exist_ok=True)
+                            sitk.WriteImage(sitk.GetImageFromArray(rearrange(self.postprocess(im), "c ... -> ... c")), f)
+                        elif suffix == '.npy':
+                            f = os.path.join(self.base, k, sample_name_b + suffix)
+                            im = value_b.cpu().data.numpy().astype(dtypes.get(key, np.float32))
+                            np.save(f, im)
+                        self.dataset[sample_name_b][k] = f
+                    else:
+                        self.dataset[sample_name_b][k] = value_b
+        return 
                     
     def postprocess(self, sample):
         # c h w d
@@ -311,7 +323,7 @@ class InferLatentDiffusion(LatentDiffusion, ComputeMetrics, MakeDataset):
         x = logs["inputs"]
         x_samples = logs["samples"]
         if self.save_dataset:
-            self.add(logs, batch.get("casename"), dtypes={"image": np.uint8})
+            self.add(logs | batch, batch.get("casename"), dtypes={"image": np.float32})
             
         if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
             metrics = self.log_eval(x_samples, x, log_group_metrics_in_2d)
@@ -521,7 +533,7 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
         if x_recon.ndim < self.dims + 2: x_recon = x_recon[:, None]
         
         if self.save_dataset:
-            self.add({"image": x_recon, "text": batch[self.cond_key]}, batch.get("casename"), dtypes={"image": np.uint8})
+            self.add({"inputs": x, "samples": x_recon}, batch.get("casename"), dtypes={"inputs": np.uint8, "samples": np.uint8})
         
         if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
             metrics = self.log_eval(x_recon, x, log_group_metrics_in_2d)

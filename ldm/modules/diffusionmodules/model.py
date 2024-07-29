@@ -6,7 +6,7 @@ import numpy as np
 from einops import rearrange
 
 from ldm.util import instantiate_from_config
-from ldm.modules.attention import LinearAttention
+from ldm.modules.attention import LinearAttention, SpatialTransformer
 from ldm.modules.diffusionmodules.util import checkpoint
 from ldm.modules.distributions.distributions import DiagonalGaussianDistribution
 
@@ -222,13 +222,15 @@ class AttnBlock(nn.Module):
         return x+h_
 
 
-def make_attn(in_channels, attn_type="vanilla", dims=3):
+def make_attn(in_channels, attn_type="vanilla", dims=3, **kw):
     assert attn_type in ["vanilla", "linear", "none"], f'attn_type {attn_type} unknown'
     print(f"making attention of type '{attn_type}' with {in_channels} in_channels")
     if attn_type == "vanilla":
         return AttnBlock(in_channels, dims=dims)
     elif attn_type == "none":
         return nn.Identity(in_channels)
+    elif attn_type == "cross":
+        return SpatialTransformer(in_channels, dims=dims, **kw)
     else:
         return LinAttnBlock(in_channels, dims=dims)
 
@@ -391,11 +393,12 @@ class Encoder(nn.Module):
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels,
                  resolution, z_channels, double_z=True, use_linear_attn=False, attn_type="vanilla", dims=3, condition_channels=0,
-                 **ignore_kwargs):
+                 **kw):
         super().__init__()
         if use_linear_attn: attn_type = "linear"
         self.ch = ch
         self.temb_ch = 0
+        self.attn_type = attn_type
         self.num_resolutions = len(ch_mult)
         self.num_res_blocks = num_res_blocks
         self.resolution = resolution
@@ -425,12 +428,12 @@ class Encoder(nn.Module):
                                          dropout=dropout, dims=dims))
                 block_in = block_out
                 if curr_res in attn_resolutions:
-                    attn.append(make_attn(block_in, attn_type=attn_type, dims=dims))
+                    attn.append(make_attn(block_in, attn_type=attn_type, dims=dims, **kw))
             down = nn.Module()
             down.block = block
             down.attn = attn
             if i_level != self.num_resolutions-1:
-                down.downsample = Downsample(block_in, resamp_with_conv, dims=dims)
+                down.downsample = Downsample(block_in, resamp_with_conv, dims=dims, **kw)
                 curr_res = curr_res // 2
             self.down.append(down)
 
@@ -440,7 +443,7 @@ class Encoder(nn.Module):
                                        out_channels=block_in,
                                        temb_channels=self.temb_ch,
                                        dropout=dropout, dims=dims)
-        self.mid.attn_1 = make_attn(block_in, attn_type=attn_type, dims=dims)
+        self.mid.attn_1 = make_attn(block_in, attn_type=attn_type, dims=dims, **kw)
         self.mid.block_2 = ResnetBlock(in_channels=block_in,
                                        out_channels=block_in,
                                        temb_channels=self.temb_ch,
@@ -462,8 +465,8 @@ class Encoder(nn.Module):
             if "c_concat" in c: 
                 assert x.shape[2:] == c["c_concat"].shape[2:]
                 x = torch.cat([x, c["c_concat"]], dim=1)
-            if "crossattn" in c:
-                raise NotImplementedError("VAE not implemented for crossattn condition")
+            elif c is not None:
+                assert self.attn_type == "cross"
 
         # downsampling
         hs = [self.conv_in(x)]
@@ -471,7 +474,7 @@ class Encoder(nn.Module):
             for i_block in range(self.num_res_blocks):
                 h = self.down[i_level].block[i_block](hs[-1], temb)
                 if len(self.down[i_level].attn) > 0:
-                    h = self.down[i_level].attn[i_block](h)
+                    h = self.down[i_level].attn[i_block](h) if self.attn_type != 'cross' else self.down[i_level].attn[i_block](h, c)
                 hs.append(h)
             if i_level != self.num_resolutions-1:
                 hs.append(self.down[i_level].downsample(hs[-1]))
@@ -479,7 +482,7 @@ class Encoder(nn.Module):
         # middle
         h = hs[-1]
         h = self.mid.block_1(h, temb)
-        h = self.mid.attn_1(h)
+        h = self.mid.attn_1(h) if self.attn_type != 'cross' else self.mid.attn_1(h, c)
         h = self.mid.block_2(h, temb)
 
         # end

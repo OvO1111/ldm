@@ -1,9 +1,11 @@
 from torch.utils.data import  Dataset
+import sys
+sys.path.append('/ailab/user/dailinrui/code/latentdiffusion/')
 from ldm.data.utils import identity, window_norm, TorchioForegroundCropper, TorchioSequentialTransformer
 import torch
 import h5py
 import torchio as tio
-import os, json
+import os, numpy as np
 from collections import OrderedDict
 from functools import reduce, partial
 
@@ -25,14 +27,14 @@ class GatheredEnsembleDataset(Dataset):
         self.base = base
         self.split = split
         
-        self.train_keys = os.listdir(os.path.join(self.base, 'train_v2'))
-        self.val_keys = self.test_keys = os.listdir(os.path.join(self.base, 'val_v2'))
+        self.train_keys = os.listdir(os.path.join(self.base, 'train'))
+        self.val_keys = self.test_keys = os.listdir(os.path.join(self.base, 'val'))
         self.split_keys = getattr(self, f"{split}_keys")[:max_size]
         
     def __len__(self): return len(self.split_keys)
     
     def __getitem__(self, idx):
-        sample = h5py.File(os.path.join(self.base, 'train_v2' if self.split == 'train' else 'val_v2', self.split_keys[idx]))
+        sample = h5py.File(os.path.join(self.base, 'train' if self.split == 'train' else 'val', self.split_keys[idx]))
         attrs = sample.attrs
         ds = {k: sample[k][:] for k in sample.keys()}
         ds['prompt_context'] = ds["prompt_context"][0]
@@ -48,6 +50,7 @@ class GatheredEnsembleDataset(Dataset):
         sample = dict(**attrs) | ds
         sample.update({k: getattr(subject, k).data for k in subject.keys()})
         sample.update({"cond": torch.cat([sample['totalseg'], sample['mask']], dim=0)})
+        if sample['mask'].max() > 1: sample['mask'] = (sample['mask'] == 2).float()  # kits
         return sample
 
     
@@ -57,20 +60,13 @@ class GatheredDatasetForClassification(GatheredEnsembleDataset):
         self.transforms['norm'] = tio.Lambda(partial(window_norm, window_pos=60, window_width=360), include=['image'])
         self.transforms['augmentation'] = TorchioSequentialTransformer(OrderedDict({
             "first": tio.OneOf({
-                tio.RandomFlip(axes=(0,), flip_probability=0.2): 1,
-                tio.RandomFlip(axes=(1,), flip_probability=0.2): 1,
-                tio.RandomFlip(axes=(2,), flip_probability=0.2): 1,
-                tio.RandomAffine(scales=.2, degrees=30, translation=30): 2,
-                tio.Lambda(identity): 5,
-            }),
-            "second": tio.OneOf({
-                tio.RandomAnisotropy(0, downsampling=(1.5, 5), image_interpolation='linear'): 2,
-                tio.RandomAnisotropy((1,2), downsampling=(1.5, 5), image_interpolation='linear'): 2,
-                tio.RandomNoise(): 1,
+                tio.RandomAnisotropy(0, downsampling=(1.5, 5), image_interpolation='linear', include=['image']): 2,
+                tio.RandomAnisotropy((1,2), downsampling=(1.5, 5), image_interpolation='linear', include=['image']): 2,
+                tio.RandomNoise(include=['image']): 1,
                 tio.Lambda(identity): 5
             }),
-            "third": tio.OneOf({
-                tio.RandomGamma(): 5,
+            "second": tio.OneOf({
+                tio.RandomGamma(include=['image']): 5,
                 tio.Lambda(identity): 5
             })
         }))
@@ -79,5 +75,61 @@ class GatheredDatasetForClassification(GatheredEnsembleDataset):
 class GatheredDatasetForGeneration(GatheredEnsembleDataset):
     def __init__(self, **kw):
         super().__init__(**kw)
-        self.transforms['norm'] = tio.Lambda(partial(window_norm, window_pos=0, window_width=1500), include=['image'])
+        self.transforms['norm'] = tio.Lambda(partial(window_norm, window_pos=0, window_width=2400), include=['image'])
 
+
+class GatheredDatasetForMaskGeneration(GatheredEnsembleDataset):
+    def __init__(self, num_classes=20, **kw):
+        super().__init__(**kw)
+        self.transforms['norm'] = tio.RescaleIntensity(in_min_max=(0, num_classes), out_min_max=(0, 1), include=['totalseg'])
+        
+    def __getitem__(self, idx):
+        sample = h5py.File(os.path.join(self.base, 'train' if self.split == 'train' else 'val', self.split_keys[idx]))
+        attrs = sample.attrs
+        ds = {k: sample[k][:] for k in sample.keys()}
+        ds['prompt_context'] = ds["prompt_context"][0]
+        
+        subject = tio.Subject(totalseg=tio.ScalarImage(tensor=ds['totalseg']),
+                              mask=tio.LabelMap(tensor=ds['mask'].astype(np.uint8) if ds['mask'].max() == 1 else (ds['mask'] == 1).astype(np.uint8)))
+        subject = self.transforms['crop'](subject)
+        subject = self.transforms['resize'](subject)
+        subject = self.transforms['norm'](subject)
+        subject = self.transforms.get('augmentation', lambda x: x)(subject)
+        
+        sample = dict(**attrs) | ds
+        sample.update({k: getattr(subject, k).data for k in subject.keys()})
+        return sample
+    
+    
+class MedSynDataset(GatheredEnsembleDataset):
+    def __getitem__(self, idx):
+        sample = h5py.File(os.path.join(self.base, 'train' if self.split == 'train' else 'val', self.split_keys[idx]))
+        attrs = sample.attrs
+        ds = {k: sample[k][:] for k in sample.keys()}
+        ds['prompt_context'] = ds["prompt_context"][0]
+        
+        subject = tio.Subject(image=tio.ScalarImage(tensor=ds['image']),
+                              totalseg=tio.LabelMap(tensor=ds['totalseg']),
+                              mask=tio.LabelMap(tensor=ds['mask'].astype(np.uint8) if ds['mask'].max() == 1 else (ds['mask'] == 1).astype(np.uint8)))
+        subject = self.transforms['crop'](subject)
+        subject = self.transforms['resize'](subject)
+        subject = self.transforms['norm'](subject)
+        subject = self.transforms.get('augmentation', lambda x: x)(subject)
+        sample =  {"data": torch.cat([subject.image.data, subject.totalseg.data / 10 - 1, subject.mask.data], dim=0),
+                   "prompt_context": torch.tensor(ds['prompt_context'])}
+        return sample
+
+
+if __name__ == "__main__":
+    # import SimpleITK as sitk
+    # import numpy as np
+    # from tqdm import tqdm
+    # p = "/ailab/user/dailinrui/data/datasets/ensemble/image"
+    # os.makedirs(p, exist_ok=1)
+    # ds = GatheredDatasetForGeneration(split='train', resize_to=(128,128,128), )
+    # for i in tqdm(range(1000)):
+    #     x = ds[i]
+    #     seg = x['mask'].max()
+    #     if seg != 1: print(seg)
+    #     sitk.WriteImage(sitk.GetImageFromArray(seg), os.path.join(p, x['casename'] + ".nii.gz"))
+    pass

@@ -1,8 +1,0 @@
-2024-07-16 17:17:21.810038: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
-To enable the following instructions: AVX2 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
-2024-07-16 17:17:22.942665: W tensorflow/compiler/tf2tensorrt/utils/py_utils.cc:38] TF-TRT Warning: Could not find TensorRT
-/ailab/user/dailinrui/.conda/envs/ldm/lib/python3.11/site-packages/torch/_utils.py:831: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
-  return self.fget.__get__(instance, owner)()
-Some weights of ErnieModel were not initialized from the model checkpoint at /ailab/user/dailinrui/data/dependency/bert-ernie-health and are newly initialized: ['ernie.pooler.dense.bias', 'ernie.pooler.dense.weight']
-You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
-  0%|          | 0/5072 [00:00<?, ?it/s]  0%|          | 1/5072 [00:17<25:07:58, 17.84s/it]  0%|          | 2/5072 [00:20<12:31:37,  8.89s/it]  0%|          | 3/5072 [00:25<9:56:23,  7.06s/it] slurmstepd: error: *** JOB 25274 ON g0585 CANCELLED AT 2024-07-16T17:17:56 ***

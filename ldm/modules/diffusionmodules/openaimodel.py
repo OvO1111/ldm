@@ -447,13 +447,13 @@ class UNetModel(nn.Module):
 
     def __init__(
         self,
-        image_size,
         in_channels,
         model_channels,
         out_channels,
         num_res_blocks,
         attention_resolutions,
         dropout=0,
+        image_size=None,
         channel_mult=(1, 2, 4, 8),
         conv_resample=True,
         dims=3,
