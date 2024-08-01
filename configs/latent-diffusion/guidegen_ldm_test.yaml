@@ -25,7 +25,7 @@ model:
     ckpt_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/checkpoints/last.ckpt
 
     save_dataset: true 
-    save_dataset_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/dataset
+    save_dataset_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/dataset_noddim
     include_keys: [samples, inputs, cond, prompt]
     suffix_keys: 
       samples: .nii.gz
@@ -138,6 +138,7 @@ lightning:
         log_images_kwargs:
           quantize_denoised: false 
           plot_conditioned_samples: false
+          ddim_steps: null
         logger:
           inputs: 
             target: image_rescale

@@ -29,6 +29,14 @@ def exists(x):
     return x is not None
 
 
+class print_once:
+    counter = 0
+    def __call__(self, msg):
+        if counter != 0: return
+        print(msg)
+        counter += 1
+
+
 class MetricType(IntEnum):
     lpips = 1
     fid = 2
@@ -149,7 +157,7 @@ class MakeDataset:
                  dataset_base,
                  include_keys,
                  suffixes,
-                 bs=1, create_split=False, dims=3, desc=None):
+                 bs=1, create_split=False, dims=3, desc=None, overwrite=False):
         self.bs = bs
         self.dims = dims
         self.desc = desc
@@ -157,6 +165,7 @@ class MakeDataset:
         self.suffixes = suffixes
         self.include_keys = include_keys
         self.create_split = create_split
+        self.overwrite = False
         
         self.dataset = dict()
         
@@ -177,19 +186,26 @@ class MakeDataset:
                     value_b = v[b]
                     k = "_".join([key, k])
                     if isinstance(value_b, torch.Tensor):
-                        f = "not saved"
                         suffix = self.suffixes.get(key, self.suffixes.get(k, ""))
+                        f = os.path.join(self.base, k, sample_name_b + suffix)
+                        os.makedirs(os.path.dirname(f), exist_ok=True)
+                        if os.path.exists(f) and not self.overwrite:
+                            time = [(file, os.path.getmtime(os.path.join(os.path.dirname(f), file))) for file in os.listdir(os.path.dirname(f))]
+                            maxtimefile = max(time, key=lambda x: x[1])[0]
+                            if maxtimefile[-len(suffix) - 2] == 'v': 
+                                maxtime = int(maxtimefile[-len(suffix) - 1])
+                            else: maxtime = 0
+                            f = f.replace(suffix, f'_v{maxtime + 1}' + suffix)
+                            # print(f"found existent file, saving new one at {f}. if this is not desired, u can set MakeDataset().overwrite to be True")
+                        im = value_b.cpu().data.numpy().astype(dtypes.get(key, np.float32))
                         if suffix == '.nii.gz':
-                            f = os.path.join(self.base, k, sample_name_b + suffix)
-                            im = value_b.cpu().data.numpy().astype(dtypes.get(key, np.float32))
                             assert im.ndim == self.dims + 1, f"desired ndim {self.dims} and actual ndim {im.shape} not match"
-                            os.makedirs(os.path.dirname(f), exist_ok=True)
                             sitk.WriteImage(sitk.GetImageFromArray(rearrange(self.postprocess(im), "c ... -> ... c")), f)
+                            continue
                         elif suffix == '.npy':
-                            f = os.path.join(self.base, k, sample_name_b + suffix)
-                            im = value_b.cpu().data.numpy().astype(dtypes.get(key, np.float32))
                             np.save(f, im)
-                        self.dataset[sample_name_b][k] = f
+                            continue
+                        self.dataset[sample_name_b][k] = "not saved"
                     else:
                         self.dataset[sample_name_b][k] = value_b
         return 

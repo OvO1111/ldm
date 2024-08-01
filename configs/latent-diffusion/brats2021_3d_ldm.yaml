@@ -9,7 +9,7 @@ model:
     timesteps: 1000
     loss_type: l1
     first_stage_key: image
-    cond_stage_key: cond
+    cond_stage_key: cond_onehot
     conditioning_key: concat
     image_size: [24, 24, 24]  # after first-stage encoding
     channels: 4  # after first-stage encoding
@@ -92,7 +92,7 @@ model:
         double_z: false
         z_channels: 4
         resolution: [96, 96, 96]
-        in_channels: 2
+        in_channels: 4
         ch: 64
         out_ch: 1
         ch_mult: [1,1,1]  # num_down = len(ch_mult)-1

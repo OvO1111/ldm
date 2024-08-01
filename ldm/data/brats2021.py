@@ -72,7 +72,7 @@ class BraTS2021_3D(Dataset):
                                                              'casename': os.path.basename(self.split_keys[idx]).split('.')[0]}
         subject = subject | {'cond': torch.cat([subject['coarse'], subject['mask']])}
         subject = subject | {"cond_onehot": torch.cat([subject['coarse'],
-                                                       rearrange(torch.nn.functional.one_hot(subject['mask'], 4), '1 ... n -> n ...')[1:] if idx in self.fine_labeled_indices else torch.zeros((3,) + subject['coarse'].shape[1:])], dim=0)}
+                                                       rearrange(torch.nn.functional.one_hot(subject['fine'].long(), 4), '1 ... n -> n ...')[1:].float() if idx in self.fine_labeled_indices else torch.zeros((3,) + subject['coarse'].shape[1:])], dim=0)}
 
         return subject
         

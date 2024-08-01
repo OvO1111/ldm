@@ -251,6 +251,10 @@ def lpips_clip(x: torch.Tensor):
     return x.clamp(-1, 1)
 
 
+def normalize(x: torch.Tensor):
+    return (x - x.min()) / (x.max() - x.min())
+
+
 def noise_transform(x: torch.Tensor):
     y = torch.randn((128, 128, 128), device=x.device)
     return ((y - y.min()) / (y.max() - y.min())).round()
@@ -299,9 +303,9 @@ def main():
     #                                              "/ailab/user/dailinrui/data/datasets/ensemble/tumorseg",
     #                                              metrics=['lpips', 'fid'], source_transform=noise_transform, target_transform=tumor_transform,)
                                                  #target_case=[_ for _ in os.listdir("/ailab/user/dailinrui/data/datasets/ensemble/tumorseg") if 'LI' in _ or 'liver' in _ ])
-    # metric_calculator = ComputeGenerationMetrics("/ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/dataset/inputs_value",
-    #                                              "/ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/dataset/samples_value",
-    #                                              metrics=['lpips', 'fid', 'fvd'], max_size=200)
+    # metric_calculator = ComputeGenerationMetrics("/ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/dataset_noddim/inputs_value",
+    #                                              "/ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/dataset_noddim/samples_value",
+    #                                              metrics=['lpips', 'fid', 'fvd'], max_size=100, source_transform=normalize, target_transform=normalize)
     
     # metric_calculator = ComputeSegmentationMetrics("/ailab/user/dailinrui/data/nnUNetv2/nnUNet_raw/Dataset201_BTCV_ABD/predsTs",
     #                                                "/ailab/user/dailinrui/data/nnUNetv2/nnUNet_raw/Dataset201_BTCV_ABD/labelsTs",
@@ -312,8 +316,8 @@ def main():
     # metric_calculator = ComputeSegmentationMetrics("/ailab/user/dailinrui/data/nnUNetv2/nnUNet_raw/Dataset204_MSD_COLON/predsTsV1",
     #                                                "/ailab/user/dailinrui/data/nnUNetv2/nnUNet_raw/Dataset204_MSD_COLON/labelsTs",
     #                                                num_classes=2, classes_to_focus=[1], metrics=['dice', 'precision', 'recall', 'hd95'],)
-    metric_calculator = ComputeSegmentationMetrics("/ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/dataset/consistency/totalseg",
-                                                   "/ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/dataset/consistency/cond_totalseg",
+    metric_calculator = ComputeSegmentationMetrics("/ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/dataset_noddim/consistency/totalseg",
+                                                   "/ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/dataset_noddim/consistency/cond_totalseg",
                                                    num_classes=20, classes_to_focus=[], metrics=['dice'], source_transform=totalsegv2_transform)
     metric_calculator.compute()
     

@@ -1,9 +1,8 @@
 import argparse, os, sys, glob, re
 import numpy as np
-import time
+import random
 import torch
 import wandb
-import h5py
 import pytorch_lightning as pl
 
 from omegaconf import OmegaConf
@@ -242,7 +241,8 @@ if __name__ == "__main__":
     cfgdir = os.path.join(logdir, "configs")
     os.makedirs(ckptdir, exist_ok=True)
     os.makedirs(cfgdir, exist_ok=True)
-    seed_everything(opt.seed)
+    # seed_everything(opt.seed)
+    seed_everything(random.randint(1, 16384))
 
     try:
         # init and save configs

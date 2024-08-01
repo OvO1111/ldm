@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import matplotlib.font_manager
 from matplotlib.cm import get_cmap
 from torchvision.utils import make_grid
-from einops import rearrange
+from einops import rearrange, repeat
 from scipy.ndimage import sobel, distance_transform_edt
 from SimpleITK import GetArrayFromImage, ReadImage
 
@@ -59,9 +59,17 @@ def combine_mask_and_im_v2(x,
     colored_image = rearrange(colored_image, "b h w d c -> (b h) c w d")
     colored_image = make_grid(torch.tensor(colored_image), nrow=1, normalize=False, pad_value=255, padding=3)
     return colored_image
+
+
+def window_norm(image, window_pos=60, window_width=360, out=(-1, 1)):
+    window_min = window_pos - window_width / 2
+    image = (image - window_min) / window_width
+    image = (out[1] - out[0]) * image + out[0]
+    image = image.clamp(min=out[0], max=out[1])
+    return image
         
 
-def visualize(image: torch.Tensor, n_mask: int=20, num_images=8, is_mask=False):
+def visualize(image: torch.Tensor, n_mask: int=20, num_images=8, is_mask=False, color=None, wp=0, wn=10):
     is_mask = is_mask or image.dtype == torch.long
     if len(image.shape) == 5:
         image = image[:, 0] 
@@ -70,17 +78,17 @@ def visualize(image: torch.Tensor, n_mask: int=20, num_images=8, is_mask=False):
         if h > num_images: image = image[:, ::h // num_images]
         image = rearrange(image, "b h w d -> (b h) 1 w d")
     else: return image
-    image = make_grid(image, nrow=1, normalize=not is_mask, pad_value=255, padding=3)
+    image = make_grid(image, nrow=1, normalize=False, pad_value=255, padding=3)
 
     if is_mask:
         cmap = get_cmap("viridis")
-        rgb = torch.tensor([(0, 0, 0)] + [cmap(i)[:-1] for i in (n_mask - np.arange(0., n_mask)) / n_mask] + [(255, 255, 255)], device=image.device)
-        image = image.long().clip(0, n_mask + 1)
+        rgb = torch.tensor([(0, 0, 0)] + ([cmap(i)[:-1] for i in (n_mask - np.arange(0., n_mask)) / n_mask] if color is None else color) + [(1, 1, 1)], device=image.device)
+        image = image.long().clip(0, n_mask)
         colored_mask = rearrange(rgb[image.long()][0], "i j n -> n i j")
         return colored_mask
     else:
-        image = (image - image.min()) / (image.max() - image.min())
-        return image[0]
+        image = window_norm(image, wp, wn)
+        return image
 
 
 def image_logger(ind_vis, path, **kwargs):
@@ -114,15 +122,17 @@ def visualize_image_generative(cond_path, dict_of_image_paths):
     mask = GetArrayFromImage(ReadImage(cond_path))
     totalseg = mask[..., 0]
     tumorseg = mask[..., 1]
-    dict_of_images = [visualize(torch.tensor(totalseg)[None, None], num_images=3, is_mask=1, n_mask=20), visualize(torch.tensor(tumorseg)[None, None], num_images=3, is_mask=1, n_mask=2)]
+    dict_of_images = [visualize(torch.tensor(totalseg)[None, None], num_images=3, is_mask=1, n_mask=20,
+                                color=[get_cmap("tab20")(i / 20)[:-1] for i in range(20)]), visualize(torch.tensor(tumorseg)[None, None], num_images=3, is_mask=1, n_mask=2, color=[(1, 1, 1)])]
     for k, v in dict_of_image_paths.items():
         image = GetArrayFromImage(ReadImage(v))
-        dict_of_images.append(combine_mask_and_im_v2(
-            torch.cat([torch.tensor(image)[None, None], torch.tensor(totalseg)[None, None]], dim=1),
-            overlay_coef=.5, n_mask=20, mask_normalized=False, num_images=3))
+        # dict_of_images.append(combine_mask_and_im_v2(
+        #     torch.cat([torch.tensor(image)[None, None], torch.tensor(totalseg)[None, None]], dim=1),
+        #     overlay_coef=.5, n_mask=20, mask_normalized=False, num_images=3))
+        dict_of_images.append(visualize(torch.tensor(image)[None, None], is_mask=False, num_images=3))
         
     images = torch.cat(dict_of_images, dim=2).cpu().numpy()
-    image_logger({"image": images}, "./helpers/result.pdf")
+    image_logger({"image": images}, "./helpers/result.png")
     
     
 
