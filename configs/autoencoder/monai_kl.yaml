@@ -1,41 +1,38 @@
 model:
-  base_learning_rate: 2e-5
-  target: ldm.models.autoencoder.VQModel
+  base_learning_rate: 2.e-5
+  target: ldm.models.autoencoder.AutoencoderKL
   params:
     monitor: "val/rec_loss"
     image_key: image
     embed_dim: 8
-    n_embed: 8192
     dims: 3
-    use_window_norm: true  
     lossconfig:
-      target: ldm.modules.losses.VQLPIPSWithDiscriminator
+      target: ldm.modules.losses.LPIPSWithDiscriminator
       params:
         disc_start: 20001
+        kl_weight: 0.000001
         disc_weight: 0.5
-        n_classes: 8192  # =n_embed
-        gan_feat_weight: 1.
-        nframes_select: 1  # 1 as in medicaldiffusion
+        disc_in_channels: 1
+        gan_feat_weight: 0.
 
     ddconfig:
-      double_z: false
-      z_channels: 8
+      double_z: true
+      z_channels: 4
       resolution: [128, 128, 128]
       in_channels: 1
       out_ch: 1
-      ch: 128
+      ch: 96
       ch_mult: [ 1, 1, 1 ]  # num_down = len(ch_mult)-1
       num_res_blocks: 2
-      attn_resolutions: []
       dropout: 0.0
-      dims: 3
+      attn_resolutions: []  # on z axis, starting with 8->16->32 for len(ch_mult)==4 and resolution==64
       attn_type: none
 
 data:
   target: main.DataModuleFromConfig
   params:
     batch_size: 1
-    num_workers: 2
+    num_workers: 12
     wrap: False
     train:
       target: ldm.data.ensemble_v2.GatheredDatasetForGeneration
@@ -56,17 +53,14 @@ lightning:
       params:
         log_separate: false
         train_batch_frequency: 400
-        val_batch_frequency: 50
-        max_images: 8
+        val_batch_frequency: 20
+        max_images: 5
         logger:
           inputs: 
             target: image_rescale
           reconstruction:
             target: image_rescale
-          samples:
-            target: image_rescale
 
   trainer:
     benchmark: True
-    accumulate_grad_batches: 1
-
+    accumulate_grad_batches: 2

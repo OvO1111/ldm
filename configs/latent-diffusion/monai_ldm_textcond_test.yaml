@@ -1,0 +1,109 @@
+model:
+  base_learning_rate: 2.e-5
+  target: inference.models.InferLatentDiffusion
+  params:
+    linear_start: 0.0015
+    linear_end: 0.0195
+    num_timesteps_cond: 1
+    log_every_t: 200
+    timesteps: 1000
+    loss_type: l1
+    first_stage_key: image
+    cond_stage_key: prompt_context
+    conditioning_key: crossattn
+    image_size: [32, 32, 32]  # after first-stage encoding
+    channels: 8  # after first-stage encoding
+    monitor: val/loss_simple
+    cond_stage_trainable: true
+    use_ema: false
+    use_window_norm: false
+    ckpt_path: /ailab/user/dailinrui/data/ldm/monai_kl_ldm_text_128_128_128/checkpoints/last-v1.ckpt
+
+    save_dataset: true 
+    save_dataset_path: /ailab/user/dailinrui/data/ldm/monai_kl_ldm_text_128_128_128/dataset
+    include_keys: [samples, inputs, prompt]
+    suffix_keys: 
+      samples: .nii.gz
+      inputs: .nii.gz
+
+    unet_config:
+      target: ldm.modules.diffusionmodules.openaimodel.UNetModel
+      params:
+        image_size: 64  # not used
+        in_channels: 8
+        out_channels: 8
+        model_channels: 128
+        attention_resolutions: [2, 4]
+        num_res_blocks: 2
+        channel_mult: [1, 2, 4]
+        num_head_channels: 64
+        use_checkpoint: true  # always use ckpt
+        use_spatial_transformer: true
+        context_dim: 768
+
+    first_stage_config:
+      target: ldm.models.autoencoder.AutoencoderKL
+      params:
+        monitor: "val/rec_loss"
+        image_key: image
+        embed_dim: 8
+        dims: 3
+        ckpt_path: /ailab/user/dailinrui/data/ldm/monai_aekl_128_128_128/checkpoints/last-v1.ckpt
+        lossconfig:
+          target: torch.nn.Identity
+
+        ddconfig:
+          double_z: true
+          z_channels: 4
+          resolution: [128, 128, 128]
+          in_channels: 1
+          out_ch: 1
+          ch: 96
+          ch_mult: [ 1, 1, 1 ]  # num_down = len(ch_mult)-1
+          num_res_blocks: 2
+          dropout: 0.0
+          attn_resolutions: []  # on z axis, starting with 8->16->32 for len(ch_mult)==4 and resolution==64
+          attn_type: none
+
+    cond_stage_config: 
+      target: torch.nn.Identity
+
+      # only text cond
+      # target: torch.nn.Identity
+
+data:
+  target: test.DataModuleFromConfig
+  params:
+    batch_size: 1
+    num_workers: 4
+    wrap: False
+    test:
+      target: ldm.data.ensemble_v2.GatheredDatasetForGeneration
+      params:
+        split: val
+        resize_to: [128, 128, 128]
+        # use_cases:  ['CPTAC-CCRCC_00001_0004.h5', 'CPTAC-LSCC_00023_0003.h5', 'RJ202302171638321690.h5', 'CMB-CRC_00009_0001.h5', 'CMB-LCA_00016_0002.h5', 'CPTAC-LUAD_00003_0000.h5']
+        use_cases: ['EnsembleV2val_00585.h5', 'EnsembleV2val_00326.h5', 'EnsembleV2val_00756.h5', 'EnsembleV2val_00278.h5', 'EnsembleV2val_00248.h5', 'EnsembleV2val_00365.h5']
+
+lightning:
+  callbacks:
+    image_logger:
+      target: test.ImageLogger
+      params:
+        test_batch_frequency: 1
+        max_images: 10
+        log_images_kwargs:
+          quantize_denoised: false 
+          plot_conditioned_samples: false
+          ddim_steps: null
+        logger:
+          inputs: 
+            target: image_rescale
+          reconstruction:
+            target: image_rescale
+          samples:
+            target: image_rescale
+
+  trainer:
+    benchmark: True
+    limit_test_batches: 200

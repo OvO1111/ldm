@@ -13,25 +13,62 @@ from ldm.data.utils import TorchioForegroundCropper, TorchioBaseResizer, \
     load_or_write_split, identity, window_norm
 
 
-class Txt2ImgIterableBaseDataset(IterableDataset):
-    '''
-    Define an interface to make the IterableDatasets for text2img data chainable
-    '''
-    def __init__(self, num_records=0, valid_ids=None, size=256):
-        super().__init__()
-        self.num_records = num_records
-        self.valid_ids = valid_ids
-        self.sample_ids = valid_ids
-        self.size = size
-
-        print(f'{self.__class__.__name__} dataset contains {self.__len__()} examples.')
-
+class GenDataset(Dataset):
+    def __init__(self, include_case=None, resize_to=(128, 128, 128), max_size=None, **kw):
+        totalseg_gen = "/ailab/user/dailinrui/data/ccdm_pl/ensemblev2_128_128_128_anatomical/dataset/samples"
+        tumorseg_gen = "/ailab/user/dailinrui/data/datasets/ensemble/val/"
+        mapping = "/ailab/user/dailinrui/data/datasets/ensemble/mapping.json"
+        with open(mapping) as f:
+            self.mapping = {v: k for k, v in json.load(f).items()}
+            
+        if include_case is None:
+            include_case = [_ for _ in os.listdir(totalseg_gen)]
+            random.shuffle(include_case)
+        
+        self.keys = [{"totalseg": os.path.join(totalseg_gen, case), 
+                      "tumorseg": os.path.join(tumorseg_gen, self.mapping[case.replace('.nii.gz', '.h5')])} for case in include_case][:max_size]
+        
+        self.transforms = dict(
+            resize=tio.Resize(resize_to) if resize_to is not None else tio.Lambda(identity),
+            crop=TorchioForegroundCropper(crop_level="mask_foreground", 
+                                          crop_anchor="totalseg",
+                                          crop_kwargs=dict(outline=(10, 10, 10))) if resize_to is not None else tio.Lambda(identity),
+        )
+        
     def __len__(self):
-        return self.num_records
-
-    @abstractmethod
-    def __iter__(self):
-        pass
+        return len(self.keys)
+    
+    def load_nifti(self, x):
+        return sitk.GetArrayFromImage(sitk.ReadImage(x))
+    
+    def __getitem__(self, idx):
+        item = self.keys[idx]
+        totalseg = self.load_nifti(item['totalseg'])
+        sample = h5py.File(item['tumorseg'])
+        attrs = sample.attrs
+        ds = {k: sample[k][:] for k in sample.keys()}
+        ds['prompt_context'] = ds["prompt_context"][0]
+        image = np.zeros_like(totalseg)
+        spacing = (1, 1, 1)
+        
+        subject = tio.Subject(image=tio.ScalarImage(tensor=ds['image'], spacing=spacing), 
+                              totalseg=tio.LabelMap(tensor=ds['totalseg'], spacing=spacing,),
+                              mask=tio.LabelMap(tensor=(ds['mask'] == 2).astype(np.float32) if ds['mask'].max() > 1 else ds['mask'], spacing=spacing))
+        
+        # resize based on spacing
+        ori_size = subject.image.data.shape
+        # crop
+        subject = self.transforms["crop"](subject)
+        # resize
+        subject = self.transforms["resize"](subject)
+        # random aug
+        subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
+        
+        sample = dict(**attrs) | ds
+        sample.update({k: getattr(subject, k).data for k in subject.keys()})
+        sample['totalseg'] = torch.tensor(totalseg[None])
+        sample.update({"cond": torch.cat([sample['totalseg'], sample['mask']], dim=0)})
+        return sample
     
 
 class MSDDataset(Dataset):

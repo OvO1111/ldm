@@ -477,7 +477,7 @@ class GatheredEnsembleDataset(Dataset):
                  split="train", 
                  resize_to=(128,128,128), 
                  max_size=None,
-                 disable_aug=True):
+                 disable_aug=True, include_ds=None, include_keys=None):
         self.transforms = TorchioSequentialTransformer({
             "crop": TorchioForegroundCropper(crop_level="mask_foreground", 
                                              crop_anchor="totalseg",
@@ -512,6 +512,12 @@ class GatheredEnsembleDataset(Dataset):
         self.train_keys = os.listdir(os.path.join(self.base, 'train'))
         self.val_keys = self.test_keys = os.listdir(os.path.join(self.base, 'val'))
         self.split_keys = getattr(self, f"{split}_keys")[:max_size]
+        with open(os.path.join(base, 'mapping.json')) as f:
+            mappings = json.load(f)
+        if include_keys is not None:
+            self.split_keys = [_ for _ in self.split_keys if _ in include_keys]
+        if include_ds is not None:
+            self.split_keys = [_ for _ in self.split_keys if reduce(lambda x, y: x | y, [x in mappings[_] for x in include_ds])]
         
     def __len__(self): return len(self.split_keys)
     

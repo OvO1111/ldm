@@ -17,15 +17,19 @@ model:
     # cond_stage_key: prompt_context
     # conditioning_key: crossattn
     image_size: [32, 32, 32]  # after first-stage encoding
+    # channels: 4  # after first-stage encoding
     channels: 8  # after first-stage encoding
     monitor: val/loss_simple
     cond_stage_trainable: false
     use_ema: false
     use_window_norm: false
-    ckpt_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/checkpoints/last.ckpt
+    ckpt_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/checkpoints/epoch=000234.ckpt
+    # ckpt_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128_wo_cam/checkpoints/last.ckpt
 
     save_dataset: true 
-    save_dataset_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/dataset_noddim
+    save_dataset_path: /ailab/user/dailinrui/data/vis/vis/
+    # save_dataset_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128_wo_cam/dataset_noddim
+    # save_dataset_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/dataset_noddim
     include_keys: [samples, inputs, cond, prompt]
     suffix_keys: 
       samples: .nii.gz
@@ -53,6 +57,7 @@ model:
       params:
         monitor: "val/rec_loss"
         image_key: image
+        # embed_dim: 4
         embed_dim: 8
         n_embed: 8192
         dims: 3
@@ -121,12 +126,18 @@ data:
     batch_size: 1
     num_workers: 4
     wrap: False
+    # test:
+    #   target: ldm.data.ensemble.GatheredEnsembleDataset
+    #   params:
+    #     split: test
+    #     resize_to: [128, 128, 128]
+    #     disable_aug: true 
+    #     include_ds: [liver]
     test:
-      target: ldm.data.ensemble.GatheredEnsembleDataset
+      target: ldm.data.base.GenDataset
       params:
-        split: test
-        resize_to: [128, 128, 128]
-        disable_aug: true 
+        include_case: [TCGA-LUAD_00004_0004.nii.gz, TCGA-LUAD_00004_0004.nii.gz]
+        max_size: 50
 
 lightning:
   callbacks:
@@ -138,7 +149,7 @@ lightning:
         log_images_kwargs:
           quantize_denoised: false 
           plot_conditioned_samples: false
-          ddim_steps: null
+          # ddim_steps: null
         logger:
           inputs: 
             target: image_rescale
@@ -150,4 +161,4 @@ lightning:
   trainer:
     benchmark: True
     max_epochs: 1000
-    limit_test_batches: 3000
+    limit_test_batches: 100

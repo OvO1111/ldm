@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from functools import partial, reduce
 from einops import rearrange, repeat
-import re
+import re, omegaconf
 import numpy as np
 # import clip
 # import kornia
@@ -371,9 +371,13 @@ class FrozenBERTEmbedder(AbstractEncoder):
 
 
 class IdentityEncoder(nn.Module):
-    def __init__(self, output_size=None, output_dtype=torch.float32):
-        self.output_size = output_size
-        self.dtype = output_dtype
+    def __init__(self, output_size=None, output_dtype='float'):
+        super().__init__()
+        self.output_size = omegaconf.OmegaConf.to_container(output_size)
+        self.dtype = torch.float32 if output_dtype == 'float' else torch.long
+        
+    def forward(self, *a, **kw):
+        return self.encode(*a, **kw)
     
     def encode(self, tensor: torch.Tensor):
         if self.output_size is None:
@@ -397,3 +401,5 @@ class HybridConditionEncoder(nn.Module):
     
     def decode(self, x):
         return x
+    
+    

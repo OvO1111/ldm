@@ -16,7 +16,7 @@ from einops import rearrange, repeat
 from ldm.data.utils import load_or_write_split
 from ldm.util import instantiate_from_config
 from ldm.models.autoencoder import AutoencoderKL, VQModelInterface
-from ldm.models.diffusion.ddpm import LatentDiffusion, ContrastiveDiffusion
+from ldm.models.diffusion.ddpm import LatentDiffusion
 from ldm.models.diffusion.cdpm_legacy import CategoricalDiffusion, OneHotCategoricalBCHW
 from ldm.models.diffusion.classifier import CharacteristicClassifier
 from ldm.models.downstream.efficient_subclass import EfficientSubclassSegmentation
@@ -1012,48 +1012,3 @@ class InferCharacteristicClassifier(CharacteristicClassifier, MakeDataset):
             self.add(logs, batch.get("casename"), dtypes={})
 
         return logs["metrics"], logs
-    
-
-class InferContDiffusion(ContrastiveDiffusion, ComputeMetrics, MakeDataset):
-    def __init__(self, 
-                 eval_scheme=[1],
-                 save_dataset=False,
-                 save_dataset_path=None,
-                 include_keys=["data", "text"],
-                 suffix_keys={"data":".nii.gz",},
-                 **diffusion_kwargs):
-        ContrastiveDiffusion.__init__(self, **diffusion_kwargs)
-        ComputeMetrics.__init__(self, eval_scheme)
-        self.save_dataset = save_dataset
-        if save_dataset:
-            assert exists(save_dataset_path)
-            MakeDataset.__init__(self, save_dataset_path, include_keys, suffix_keys)
-        self.eval()
-        
-    def test_step(self, *a):
-        pass
-    
-    def log_images(self, batch, split="train", log_metrics=False, log_group_metrics_in_2d=False, **kw):
-        logs = dict()
-        inputs = super(ContrastiveDiffusion, self).get_input(batch, self.first_stage_key)
-        mask = super(ContrastiveDiffusion, self).get_input(batch, "mask") # b c h w d
-        logs["inputs"] = inputs
-        logs["conditioning"] = mask
-        samples = torch.zeros_like(mask)
-        
-        for i in range(mask.shape[2]):
-            cond = torch.cat([mask[:, :, i], samples[:, :, max(0, i-1)]], dim=1)
-            log_ = super().log_images({self.first_stage_key: torch.randn_like(inputs[:, :, 0]),
-                                       self.cond_stage_key: cond}, **kw)
-            samples[:, :, i] = log_["samples"]
-        logs["samples"] = samples
-        
-        if self.save_dataset:
-            self.add({"samples": samples, "mask": mask}, batch.get("casename"), dtypes={"image": np.uint8})
-        
-        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
-            metrics = self.log_eval(inputs, samples, log_group_metrics_in_2d)
-            # print(metrics)
-            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            return metrics, logs
-        return None, logs
