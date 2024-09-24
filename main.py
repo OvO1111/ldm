@@ -490,6 +490,7 @@ class CUDACallback(Callback):
         self.start_time = time.time()
 
     def on_train_epoch_end(self, trainer, pl_module):
+    def on_train_epoch_end(self, trainer, pl_module):
         torch.cuda.synchronize(trainer.root_gpu)
         max_memory = torch.cuda.max_memory_allocated(trainer.root_gpu) / 2 ** 20
         epoch_time = time.time() - self.start_time
@@ -550,8 +551,6 @@ if __name__ == "__main__":
 
     ckptdir = os.path.join(logdir, "checkpoints")
     cfgdir = os.path.join(logdir, "configs")
-    os.makedirs(ckptdir, exist_ok=True)
-    os.makedirs(cfgdir, exist_ok=True)
     seed_everything(opt.seed)
 
     try:
@@ -753,6 +752,11 @@ if __name__ == "__main__":
 
         signal.signal(signal.SIGUSR1, melk)
         signal.signal(signal.SIGUSR2, divein)
+        
+        # create necessary folders
+        os.makedirs(ckptdir, exist_ok=True)
+        os.makedirs(cfgdir, exist_ok=True)
+        os.makedirs(os.path.join(logdir, "wandb"), exist_ok=True)
 
         # run
         if opt.train:
