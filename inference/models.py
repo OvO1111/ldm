@@ -17,7 +17,7 @@ from ldm.data.utils import load_or_write_split
 from ldm.util import instantiate_from_config
 from ldm.models.autoencoder import AutoencoderKL, VQModelInterface
 from ldm.models.diffusion.ddpm import LatentDiffusion
-from ldm.models.diffusion.cdpm_legacy import CategoricalDiffusion, OneHotCategoricalBCHW
+from ldm.models.diffusion.cdpm import CategoricalDiffusion, OneHotCategoricalBCHW
 from ldm.models.diffusion.classifier import CharacteristicClassifier
 from ldm.models.downstream.efficient_subclass import EfficientSubclassSegmentation
 

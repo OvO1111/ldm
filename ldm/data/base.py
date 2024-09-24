@@ -259,3 +259,68 @@ class TCIADataset(Dataset):
         subject = subject | {"attr": text}
 
         return subject
+    
+    
+class TemplateMSDDataset(Dataset):
+    def __init__(self, name, base="/ailab/user/dailinrui/data/datasets", mapping={}, split="train", max_size=None, resize_to=(96,)*3, force_rewrite_split=False, info={}):
+        base_folder = os.path.join(base, name)
+        self.base_folder = base_folder
+        if split == "test": split = "val"
+        self.transforms = dict(
+            crop=TorchioForegroundCropper(crop_level="patch", 
+                                          crop_anchor="image",
+                                          crop_kwargs=dict(output_size=resize_to)) if resize_to is not None else tio.Lambda(identity),
+            normalize_image=tio.Lambda(partial(window_norm, window_pos=60, window_width=360), include=['image']),
+            remap_mask=tio.RemapLabels(mapping, include=["mask"]) if len(mapping) > 0 else tio.Lambda(identity),
+            augmentation=tio.OneOf({tio.RandomAffine(translation=10): 0.75, tio.Lambda(identity): 0.25},)
+        )
+
+        self.split = split
+        self.name = name
+        if not os.path.exists(f"{base_folder}/train.list") or force_rewrite_split:
+            train_val_cases = os.listdir(f"{base_folder}/imagesTr")
+            random.shuffle(train_val_cases)
+            train_cases = train_val_cases[:round(0.8 * len(train_val_cases))]
+            val_cases = train_val_cases[round(0.8 * len(train_val_cases)):]
+            test_cases = os.listdir(f"{base_folder}/imagesTs")
+            
+            for spt in ["train", "val", "test"]:
+                with open(f"{base_folder}/{spt}.list", "w") as fp:
+                    for c in locals().get(f"{spt}_cases"):
+                        fp.write(c + "\n")
+        
+        for spt in ["train", "val", "test"]:
+            with open(f"{base_folder}/{spt}.list") as fp:
+                self.__dict__[f"{spt}_keys"] = [_.strip() for _ in fp.readlines()]
+        else:
+            self.split_keys = getattr(self, f"{split}_keys")[:max_size]
+            
+        self.__dict__.update(info)
+        
+    @staticmethod                
+    def load_fn(p):
+        return sitk.GetArrayFromImage(sitk.ReadImage(p))
+        
+    def __len__(self):
+        return len(self.split_keys)
+            
+    def __getitem__(self, idx):
+        item = self.split_keys[idx] if isinstance(idx, int) else idx
+        
+        if self.split in ["train", "val"]:
+            image, mask = map(lambda x: self.load_fn(os.path.join(self.base_folder, x, item)), ["imagesTr", "labelsTr"])
+            subject = tio.Subject(image=tio.ScalarImage(tensor=image[None]), 
+                                  mask=tio.LabelMap(tensor=mask[None]),)
+        if self.split == "test":
+            image = self.load_fn(os.path.join(self.base_folder, "imagesTs", item))
+            subject = tio.Subject(image=tio.ScalarImage(tensor=image[None]))
+        # crop
+        subject = self.transforms["crop"](subject)
+        # normalize
+        subject = self.transforms["normalize_image"](subject)
+        subject = self.transforms["remap_mask"](subject)
+        # random aug
+        subject = self.transforms.get("augmentation", lambda x: x)(subject)
+        subject = {k: v.data for k, v in subject.items()} | {'casename': self.split_keys[idx] if isinstance(idx, int) else idx}
+
+        return subject

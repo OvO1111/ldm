@@ -41,15 +41,15 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/categorical-diffusion/ensemble_cdm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
+            "args": ["-b", "./configs/categorical-diffusion/brats_cdm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {
             "name": "debug categoricaldiffusion-testtime",
             "type": "debugpy",
             "request": "launch",
-            "program": "./test.py",
-            "args": ["-b", "./configs/categorical-diffusion/guidegen_cdm_test.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
+            "program": "./main.py",
+            "args": ["-b", "./configs/categorical-diffusion/brats_cdm_test.yaml", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {

@@ -21,18 +21,22 @@ def minmax(x, xmin=None, xmax=None):
 class BraTS2021_3D(Dataset):
     def __init__(self, split="train", 
                 crop_to=(96, 96, 96),
+                resize_to=None,
                 use_shm=False,
                 max_size=None,
                 n_fine=None,
+                no_mask_normalize=False,
                 base="/ailab/user/dailinrui/data/datasets/BraTS2021"):
         super().__init__()
         self.load_fn = lambda x: h5py.File(x)
+        self.no_mask_normalize = no_mask_normalize
         self.transforms = dict(
             crop=TorchioForegroundCropper(crop_level="patch", 
                                           crop_anchor="image",
                                           crop_kwargs=dict(output_size=crop_to, foreground_prob=1.),) if crop_to is not None else identity,
+            resize=tio.Resize(resize_to) if resize_to is not None else identity,
             normalize_image=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=None, include=["image"]),
-            normalize_mask=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(0, 3), include=["mask"])
+            normalize_mask=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(0, 3), include=["fine"])
         )
 
         self.n_fine = n_fine
@@ -59,20 +63,24 @@ class BraTS2021_3D(Dataset):
         item = self.load_fn(self.split_keys[idx])
         image, mask = map(lambda x: item[x][:], ["image", "label"])
         
-        subject = tio.Subject(image=tio.ScalarImage(tensor=image), coarse=tio.ScalarImage(tensor=(mask >= 1).astype(np.uint8)[None]), fine=tio.ScalarImage(tensor=mask[None]),)
+        subject = tio.Subject(image=tio.ScalarImage(tensor=image), 
+                              coarse=tio.ScalarImage(tensor=(mask >= 1).astype(np.uint8)[None]), 
+                              fine=tio.ScalarImage(tensor=mask[None]),)
+        # resize
+        ori_size = subject.image.data.shape
+        subject = self.transforms['resize'](subject)
         # crop
         subject = self.transforms["crop"](subject)
         # normalize
         subject = self.transforms["normalize_image"](subject)
-        subject = self.transforms["normalize_mask"](subject)
+        if not self.no_mask_normalize: subject = self.transforms["normalize_mask"](subject)
         # random aug
         subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
         subject = {k: v.data for k, v in subject.items()} | {"ids": idx, 
-                                                             "mask": subject.fine.data if idx in self.fine_labeled_indices else subject.coarse.data, 
+                                                             "ori_size": ori_size,
+                                                             "mask": subject.fine.data if idx in self.fine_labeled_indices else -subject.coarse.data, 
                                                              'casename': os.path.basename(self.split_keys[idx]).split('.')[0]}
-        subject = subject | {'cond': torch.cat([subject['coarse'], subject['mask']])}
-        subject = subject | {"cond_onehot": torch.cat([subject['coarse'],
-                                                       rearrange(torch.nn.functional.one_hot(subject['fine'].long(), 4), '1 ... n -> n ...')[1:].float() if idx in self.fine_labeled_indices else torch.zeros((3,) + subject['coarse'].shape[1:])], dim=0)}
+        subject = subject | {'cond': torch.cat([subject['mask'], subject['coarse']])}
 
         return subject
         

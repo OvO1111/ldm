@@ -4,13 +4,13 @@ import time
 import torch
 import wandb
 import shutil
-import SimpleITK as sitk
 import pytorch_lightning as pl
 
 from packaging import version
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, Dataset, _utils
 from functools import partial
+from itertools import cycle
 from queue import Queue
 
 from pytorch_lightning import seed_everything
@@ -22,6 +22,10 @@ from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.util import instantiate_from_config, get_obj_from_str
 from inference.utils import TwoStreamBatchSampler, DistributedTwoStreamBatchSampler, image_logger, visualize, combine_mask_and_im_v2
+
+
+def exists(x):
+    return x is not None
 
 
 def default(x, defval=None):
@@ -72,7 +76,7 @@ def get_parser(**parser_kwargs):
         "--train",
         type=str2bool,
         const=True,
-        default=True,
+        default=False,
         nargs="?",
         help="train",
     )
@@ -189,9 +193,10 @@ class DataModuleFromConfig(pl.LightningDataModule):
         if self.wrap:
             for k in self.datasets:
                 self.datasets[k] = WrappedDataset(self.datasets[k])
-        if self.has_batch_sampler: self._get_batch_sampler(self.batch_sampler_config, self.datasets["train"])
+        if self.has_batch_sampler: self._get_batch_sampler(self.batch_sampler_config)
                 
-    def _get_batch_sampler(self, batch_sampler, dataset):
+    def _get_batch_sampler(self, batch_sampler):
+        dataset = self.datasets['train'] if 'train' in self.datasets else self.datasets['test']
         sampler = get_obj_from_str(batch_sampler["target"])
         if sampler == TwoStreamBatchSampler or sampler == DistributedTwoStreamBatchSampler:
             try:
@@ -234,6 +239,28 @@ class DataModuleFromConfig(pl.LightningDataModule):
                             worker_init_fn=init_fn,
                             shuffle=shuffle, 
                             collate_fn=getattr(self.datasets["validation"], "collate", _utils.collate.default_collate))
+        
+    def _test_dataloader(self, shuffle=False):
+        if self.use_worker_init_fn:
+            init_fn = worker_init_fn
+        else:
+            init_fn = None
+        if not self.has_batch_sampler:
+            return cycle(DataLoader(self.datasets["test"],
+                                    batch_size=self.batch_size,
+                                    num_workers=self.num_workers,
+                                    worker_init_fn=init_fn,
+                                    shuffle=shuffle, 
+                                    collate_fn=getattr(self.datasets["test"], "collate", _utils.collate.default_collate)))
+        else:
+            return cycle(DataLoader(self.datasets["test"],
+                                    batch_sampler=self.batch_sampler,
+                                    num_workers=self.num_workers,
+                                    worker_init_fn=init_fn,
+                                    collate_fn=getattr(self.datasets["test"], "collate", _utils.collate.default_collate)))
+    
+    def _predict_dataloader(self, shuffle=False):
+        return self._test_dataloader(shuffle)
 
 
 class SetupCallback(Callback):
@@ -294,40 +321,53 @@ class SetupCallback(Callback):
 
 
 class ImageLogger(Callback):
-    def __init__(self, train_batch_frequency, max_images, val_batch_frequency=None, clamp=False,
-                 disabled=False, log_on_batch_idx=True, log_first_step=True,
-                 log_images_kwargs=None, log_nifti=False, logger={}, log_separate=False, log_local_only=True):
+    def __init__(self, 
+                 train_batch_frequency=None,        # train log frequency
+                 test_batch_frequency=None,         # test log frequency
+                 val_batch_frequency=None,          # validation log frequency
+                 max_images=-1,                     # max images to perserve in each image folder
+                 is_training=True,                  # is training / inferencing model
+                 log_on_batch_idx=True,             # log image on batch idx / gs idx
+                 log_images_kwargs=None,            # kwargs to be passed to pl_module.log_images
+                 logger={},                         # logger for each returned image
+                 log_separate=False,                # whether to log all images on the same canvas
+                 log_local_only=True):              # only log to local folders (not in tensorboard / wandb)
         super().__init__()
         self.batch_freq_tr = train_batch_frequency
+        self.batch_freq_te = test_batch_frequency
         self.batch_freq_val = default(val_batch_frequency, train_batch_frequency)
+        
+        self.is_training = is_training
+        assert exists(train_batch_frequency) or exists(test_batch_frequency)
+        if self.batch_freq_tr is None and self.batch_freq_val is None and self.batch_freq_te is not None:
+            self.is_training = False
+        assert (is_training and exists(train_batch_frequency)) or (not is_training and exists(test_batch_frequency))
         self.max_images = max_images
         self.logger_log_images = {
             WandbLogger: self._wandb,
             TensorBoardLogger: self._board
         } if not log_local_only else {}
+        
+        # log some more at the start of each epoch
         self.log_steps_tr = [10 ** n for n in range(int(np.log10(self.batch_freq_tr)) + 1)]
         self.log_steps_val = [10 ** n for n in range(int(np.log10(self.batch_freq_val)) + 1)]
-        self.clamp = clamp
-        self.disabled = disabled
+        self.log_steps_te = [10 ** n for n in range(int(np.log10(self.batch_freq_te)) + 1)]
         self.log_on_batch_idx = log_on_batch_idx
         self.log_images_kwargs = log_images_kwargs if log_images_kwargs else {}
-        self.log_first_step = log_first_step
         self.log_separate = log_separate
         
         def _get_logger(target, params):
+            if not isinstance(params, dict): params = OmegaConf.to_container(params)
             if target == "mask_rescale":
-                return lambda x: visualize(x.long(), **params)
+                return lambda x: visualize(x.long(), **(params | {"is_mask": True}))
             if target == "image_rescale":
                 return lambda x: visualize((x - x.min()) / (x.max() - x.min()), **params)
             if target == "image_and_mask":
                 return lambda x: combine_mask_and_im_v2(x, **params)
         
-        self.log_nifti = log_nifti
-        if self.log_nifti: 
-            self.max_images = self.max_images * 2
-            self.nifti_logger = lambda x, p: sitk.WriteImage(sitk.GetImageFromArray(x), p)
         self.keep_queue_tr = Queue(self.max_images)
         self.keep_queue_val = Queue(self.max_images)
+        self.keep_queue_te = Queue(self.max_images)
         
         self.logger = {}
         for name, val in logger.items():
@@ -352,7 +392,7 @@ class ImageLogger(Callback):
         return path
     
     def _enqueue_and_dequeue(self, entry, split="train"):
-        keep_q = self.keep_queue_tr if split == "train" else self.keep_queue_val
+        keep_q = self.choose_on_split(split, self.keep_queue_tr, self.keep_queue_val, self.keep_queue_te)
         if keep_q.full():
             to_remove = keep_q.get_nowait()
             os.remove(to_remove)
@@ -374,14 +414,6 @@ class ImageLogger(Callback):
         else:
             local_images = image_logger(images, path, n_grid_images=16, log_separate=False, **self.logger)
             self._enqueue_and_dequeue(path, split)
-        
-        if self.log_nifti:
-            for k in images:
-                if isinstance(k, torch.Tensor) and k in ["samples"]:
-                    _im = images[k].contiguous()
-                    nifti_logger = partial(self.nifti_logger, x=_im[0, 0])
-                    nifti_logger(p=path.replace(".png", f"_{k}.nii.gz"))
-                    self._enqueue_and_dequeue(path.replace(".png", f"_{k}.nii.gz"), split)
         return local_images
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):
@@ -394,30 +426,36 @@ class ImageLogger(Callback):
             is_train = pl_module.training
             if is_train:
                 pl_module.eval()
-
             with torch.no_grad():
                 images = pl_module.log_images(batch, split=split, **self.log_images_kwargs)
 
             for k in images:
                 if isinstance(images[k], torch.Tensor):
                     images[k] = images[k].detach().cpu()
-                    if self.clamp:
-                        images[k] = torch.clamp(images[k], -1., 1.)
 
             local_images = self.log_local(pl_module.logger.save_dir, split, images,
                                           pl_module.global_step, pl_module.current_epoch, batch_idx)
-
             logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
             logger_log_images(pl_module, local_images, batch_idx, split)
 
             if is_train:
                 pl_module.train()
+                
+    def log_gradients(self, trainer, pl_module, batch_idx, split):
+        # log cam
+        raise NotImplementedError("CAM not yet implemented")
+    
+    def choose_on_split(self, split, tr, val, te):
+        if split == 'train': return tr
+        elif split == 'val': return val
+        elif split == 'validation': return val
+        elif split == 'test': return te
+        else: raise RuntimeError("split should be one of train / val / test")
 
     def check_frequency(self, check_idx, split="train"):
-        log_steps = self.log_steps_tr if split == "train" else self.log_steps_val
-        batch_freq = self.batch_freq_tr if split == "train" else self.batch_freq_val
-        if ((check_idx % batch_freq) == 0 or (check_idx in log_steps)) and (
-                check_idx > 0 or self.log_first_step):
+        log_steps = self.choose_on_split(split, self.log_steps_tr, self.log_steps_val, self.log_steps_te)
+        batch_freq = self.choose_on_split(split, self.batch_freq_tr, self.batch_freq_val, self.batch_freq_te)
+        if ((check_idx % batch_freq) == 0 or (check_idx in log_steps)):
             # try:
             #     log_steps.pop(0)
             # except IndexError as e:
@@ -427,15 +465,20 @@ class ImageLogger(Callback):
         return False
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if not self.disabled and (pl_module.global_step > 0 or self.log_first_step):
+        if not self.is_training and (pl_module.global_step > 0 or self.log_first_step):
             self.log_img(pl_module, batch, batch_idx, split="train")
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        if not self.disabled and pl_module.global_step > 0:
+        if not self.is_training and pl_module.global_step > 0:
             self.log_img(pl_module, batch, batch_idx, split="val")
-        if hasattr(pl_module, 'calibrate_grad_norm'):
-            if (pl_module.calibrate_grad_norm and batch_idx % 25 == 0) and batch_idx > 0:
-                self.log_gradients(trainer, pl_module, batch_idx=batch_idx)
+
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        if not self.disabled:
+            self.log_img(pl_module, batch, batch_idx, split="test")
+            
+    def on_predict_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        if not self.disabled:
+            self.log_img(pl_module, batch, batch_idx, split="test")
 
 
 class CUDACallback(Callback):
@@ -718,6 +761,8 @@ if __name__ == "__main__":
             except Exception:
                 melk()
                 raise
+        else:
+            trainer.test(model, data)
         # if not opt.no_test and not trainer.interrupted:
         #     trainer.test(model, data)
     except Exception:

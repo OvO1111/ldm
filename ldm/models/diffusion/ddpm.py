@@ -73,12 +73,8 @@ class DDPM(pl.LightningModule):
                  use_positional_encodings=False,
                  learn_logvar=False,
                  logvar_init=0.,
-                 use_window_norm=False,
-                 window_settings=[],
                  ):
         super().__init__()
-        self.use_window_norm = use_window_norm
-        self.window_settings = window_settings
         assert parameterization in ["eps", "x0"], 'currently only supporting "eps" and "x0"'
         self.parameterization = parameterization
         print(f"{self.__class__.__name__}: Running in {self.parameterization}-prediction mode")
@@ -189,15 +185,6 @@ class DDPM(pl.LightningModule):
                 self.model_ema.restore(self.model.parameters())
                 if context is not None:
                     print(f"{context}: Restored training weights")
-                    
-    def window_norm(self, x, y):
-        if self.use_window_norm:
-            xs, ys = [], []
-            for window_setting in self.window_settings:
-                xs.append(window_norm(x, *window_setting))
-                ys.append(window_norm(y, *window_setting))
-            x, y = map(lambda i: torch.cat(i, dim=0), [xs, ys])
-        return x, y
 
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
         sd = torch.load(path, map_location="cpu")
@@ -1051,7 +1038,6 @@ class LatentDiffusion(DDPM):
         else:
             raise NotImplementedError()
 
-        model_output, target = self.window_norm(model_output, target)
         loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
@@ -1456,73 +1442,49 @@ class DiffusionWrapper(pl.LightningModule):
         return out
     
     
-class Img2MaskDiffusion(LatentDiffusion):
-    def __init__(self, image_key, mask_key,
-                 vae_decoder_trainable=False,
-                 vae_decoder_config=None,
-                 *args, **kwargs):
-        assert image_key != mask_key
-        self.mask_key = mask_key
-        self.training_vae_decoder = vae_decoder_trainable
-        self.vae_decoder_config = vae_decoder_config
-        super().__init__(first_stage_key=image_key, *args, **kwargs)
-        if self.training_vae_decoder:
-            self.decoder = instantiate_from_config(self.vae_decoder_config)
+class CoarseAndFineDiffusion(LatentDiffusion):
+    def __init__(self, foreground_loss_coef=1., foreground_fine_coef=1., n_fine=4, **kw):
+        super().__init__(**kw)
+        self.foreground_loss_coef = foreground_loss_coef
+        self.foreground_fine_coef = foreground_fine_coef
+        self.n_fine = n_fine
         
-    def shared_step(self, batch, **kwargs):
-        x, c = self.get_input(batch, self.first_stage_key)
-        mx = super(LatentDiffusion, self).get_input(batch, self.mask_key)
-        mx = repeat(mx, "b c ... -> b (repeat c) ...", repeat=self.first_stage_model.encoder.in_channels)
-        cf = super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key).to(self.device) if self.is_conditional_first_stage else None
-        encoder_posterior = self.encode_first_stage(mx, cf)
-        mz = self.get_first_stage_encoding(encoder_posterior).detach()
-        if not self.training_vae_decoder: 
-            loss = self(x, c, mz)
+    def get_loss(self, c, pred, target, mean=True):
+        if self.loss_type == 'l1':
+            loss = (target - pred).abs()
+            if mean:
+                loss = loss.mean()
+        elif self.loss_type == 'l2':
+            if mean:
+                loss = torch.nn.functional.mse_loss(target, pred)
+            else:
+                loss = torch.nn.functional.mse_loss(target, pred, reduction='none')
         else:
-            loss = self(x, c, mz, m=mx[:, 0].long(), cf=cf)
+            raise NotImplementedError("unknown loss type '{loss_type}'")
+        
+        loss = loss * (c[:, 1:2] * self.foreground_loss_coef + 1)  # boost foreground loss, chn0: fine, chn1: coarse
+        for i_fine in range(1, self.n_fine):
+            mask = c[:, 0] == i_fine
+            if mask.sum() > 0:
+                loss = loss * (mask * torch.clamp(c[:, 1].sum() / mask.sum(), 0, 1e2) * self.foreground_fine_coef + 1)
         return loss
     
-    def dice_loss(self, pred, gt):
-        if pred.ndim != gt.ndim: 
-            gt = rearrange(nn.functional.one_hot(gt, num_classes=pred.shape[1]), "b ... c -> b c ...")
-        loss = 0.
-        smooth = 1e-5
-        if not torch.all(pred.sum(1) == 1):
-            pred = nn.functional.softmax(pred, dim=1)
-        for i in range(pred.shape[1]):
-            loss += 1 - (2 * (pred * gt).sum() + smooth) / (pred.sum() + gt.sum() + smooth) / pred.shape[0]
-        return loss / pred.shape[1]
-    
-    def forward(self, x, c, mx, m=None, cf=None, *args, **kwargs):
-        t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
-        if self.model.conditioning_key is not None:
-            assert c is not None
-            if self.cond_stage_trainable:
-                c = self.get_learned_conditioning(c)
-            # if self.shorten_cond_schedule:  # TODO: drop this option
-            #     tc = self.cond_ids[t].to(self.device)
-            #     c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
-        loss, loss_dict, model_output = self.p_losses(x, c, mx, t, *args, **kwargs)
-        if self.training_vae_decoder:
-            model_output_dec = self.decoder(model_output, {f"c_{self.model.conditioning_key}": cf})
-            seg_loss_ce = nn.functional.cross_entropy(model_output_dec, m)
-            seg_loss_dice = self.dice_loss(model_output_dec, m)
-            seg_loss = .5 * seg_loss_ce + .5 * seg_loss_dice
-            loss = loss + seg_loss * 10
-            loss_dict.update({f"{'train' if self.training else 'val'}/loss_seghead": seg_loss})
-        return loss, loss_dict
-    
-    def p_losses(self, x_start, cond, desired_x_out, t, noise=None):
+    def p_losses(self, x_start, cond, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
-        x_noisy = x_start
+        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         model_output = self.apply_model(x_noisy, t, cond)
 
         loss_dict = {}
         prefix = 'train' if self.training else 'val'
 
-        target = desired_x_out
+        if self.parameterization == "x0":
+            target = x_start
+        elif self.parameterization == "eps":
+            target = noise
+        else:
+            raise NotImplementedError()
 
-        loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
+        loss_simple = self.get_loss(cond, model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
         logvar_t = self.logvar.to(self.device)[t]
@@ -1534,58 +1496,10 @@ class Img2MaskDiffusion(LatentDiffusion):
 
         loss = self.l_simple_weight * loss.mean()
 
-        loss_vlb = self.get_loss(model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
+        loss_vlb = self.get_loss(cond, model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
         loss += (self.original_elbo_weight * loss_vlb)
+        loss_dict.update({f'{prefix}/loss': loss})
 
-        return loss, loss_dict, model_output
-    
-    def configure_optimizers(self):
-        lr = self.learning_rate
-        params = list(self.model.parameters())
-        if self.cond_stage_trainable:
-            print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
-            params = params + list(self.cond_stage_model.parameters())
-        if self.training_vae_decoder:
-            print(f"{self.__class__.__name__}: Also optimizing first_stage_decoder params!")
-            params = params + list(self.decoder.parameters())
-        if self.learn_logvar:
-            print('Diffusion model optimizing logvar')
-            params.append(self.logvar)
-        opt = torch.optim.AdamW(params, lr=lr)
-        if self.use_scheduler:
-            assert 'target' in self.scheduler_config
-            scheduler = instantiate_from_config(self.scheduler_config)
-
-            print("Setting up LambdaLR scheduler...")
-            scheduler = [
-                {
-                    'scheduler': LambdaLR(opt, lr_lambda=scheduler.schedule),
-                    'interval': 'step',
-                    'frequency': 1
-                }]
-            return [opt], scheduler
-        return opt
-    
-    @torch.no_grad()
-    def decode_mask(self, z, c=None, predict_cids=False, force_not_quantize=False):
-        if not self.training_vae_decoder:
-            return super().decode_first_stage(z, c, predict_cids, force_not_quantize)
-        return self.decoder(z, {f"c_{self.model.conditioning_key}": c})
-    
-    @torch.no_grad()
-    def log_images(self, batch, *args, **kwargs):
-        log = super().log_images(batch, *args, **kwargs)
-        
-        mx = super(LatentDiffusion, self).get_input(batch, self.mask_key)
-        mx = repeat(mx, "b c ... -> b (repeat c) ...", repeat=self.first_stage_model.encoder.in_channels)
-        cf = super(LatentDiffusion, self).get_input(batch, self.first_stage_model.cond_key).to(self.device) if self.is_conditional_first_stage else None
-        encoder_posterior = self.encode_first_stage(mx, cf)
-        mz = self.get_first_stage_encoding(encoder_posterior).detach()
-        mxrec = self.decode_mask(mz, cf).argmax(1, keepdim=True)
-        log["mask"] = mx[:, 0:1]
-        log["recovered_mask"] = mxrec
-        log["samples"] = log["samples"].argmax(1, keepdim=True)
-        return log
-    
+        return loss, loss_dict

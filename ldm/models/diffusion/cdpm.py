@@ -80,7 +80,7 @@ class CategoricalDiffusion(pl.LightningModule):
                  dims=3,
                  linear_start=.0001,
                  linear_end=.02,
-                 cosine_s=.008, **kw):
+                 cosine_s=.008, ignore_keys=[], **kw):
         super().__init__()
         betas = make_beta_schedule(schedule, timesteps, linear_start, linear_end, cosine_s)
         alphas = 1. - betas
@@ -108,7 +108,7 @@ class CategoricalDiffusion(pl.LightningModule):
         
         if ckpt_path is not None:
             print(f"init model weights from {ckpt_path}")
-            self.init_from_ckpt(ckpt_path)
+            self.init_from_ckpt(ckpt_path, ignore_keys)
         
         if concat_encoder_config is not None: self.concat_encoder = instantiate_from_config(concat_encoder_config)
         if crossattn_encoder_config is not None: self.crossattn_encoder = instantiate_from_config(crossattn_encoder_config)
@@ -228,6 +228,7 @@ class CategoricalDiffusion(pl.LightningModule):
         elif self.conditioning_key == 'crossattn': conditions = {'c_crossattn': [self.get_input(batch, self.crossattn_key)]}
         elif self.conditioning_key == 'hybrid':
             conditions = {"c_concat": [self.get_input(batch, self.concat_key)]} | {'c_crossattn': [self.get_input(batch, self.crossattn_key)]}
+        else: conditions = {}
             
         b = mask_x0.shape[0]
         if self.training:

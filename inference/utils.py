@@ -113,7 +113,7 @@ def combine_mask_and_im(x, overlay_coef=0.2, colors=None, n=11, mask_normalied=T
     
     image = 255 * x[:, 0, ..., None].clamp(0, 1).repeat(*([1] * (ndim+1)), 3)
     mask = x[:, -1].round() * n if mask_normalied else mask[:, 1]
-    cmap = get_cmap("viridis")
+    cmap = get_cmap("tab20")
     colors = torch.tensor([(0, 0, 0)] + [cmap(i)[:-1] for i in np.arange(0.3, n) / n] if colors is None else colors, device=image.device)
     colored_mask = (colors[mask.long()] * (mask[..., None] > 0) + image * (mask[..., None] == 0))
     colored_im = colored_mask * overlay_coef + image * (1-overlay_coef)
@@ -128,7 +128,7 @@ def combine_mask_and_im_v2(x,
                            backend="cv2"):
     # x: b 2 h w (d)
     x = x.cpu().data.numpy()
-    cmap = get_cmap("viridis")
+    cmap = get_cmap("tab20")
     colors = [cmap(i)[:-1] for i in np.arange(0.3, n_mask) / n_mask] if colors is None else colors
     image = np.expand_dims(x[:, 0], -1).repeat(3, -1)
     image = (image - image.min()) / (image.max() - image.min())
@@ -182,10 +182,10 @@ def visualize(image: torch.Tensor, n_mask: int=20, num_images=8, is_mask=False):
     image = make_grid(image, nrow=min(num_images, h), normalize=not is_mask, pad_value=n_mask if is_mask else 1, padding=3)
 
     if is_mask:
-        cmap = get_cmap("viridis")
+        cmap = get_cmap("tab20")
         rgb = torch.tensor([(0, 0, 0)] + [cmap(i)[:-1] for i in (n_mask - np.arange(0., n_mask)) / n_mask], device=image.device)
         image = image.long().clip(0, n_mask)
-        colored_mask = rearrange(rgb[image.long()][0], "i j n -> 1 n i j")
+        colored_mask = rearrange(rgb[image[0].long()], "i j n -> 1 n i j")
         return colored_mask.squeeze().data.cpu().numpy()
     else:
         image = (image - image.min()) / (image.max() - image.min())
@@ -204,7 +204,7 @@ def make_gif(image: torch.Tensor, path: str, n_mask: int=20, num_images=-1, is_m
         image = rearrange(image, "b h w d -> h (b w) d")
 
     if is_mask:
-        cmap = get_cmap("viridis")
+        cmap = get_cmap("tab20")
         rgb = np.array([(0, 0, 0)] + [cmap(i)[:-1] for i in np.arange(0.3, n_mask) / n_mask], device=image.device)
         raw = (rgb[image.long()][0] * 255).astype(np.uint8)
     else:

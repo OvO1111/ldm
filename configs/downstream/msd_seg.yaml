@@ -7,7 +7,8 @@ model:
     monitor: val/loss
     num_classes: 2
     in_chns: 1
-    backbone_name: unet
+    backbone_name: sin
+    image_size: [96, 96, 96]
 
 data:
   target: main.DataModuleFromConfig
@@ -16,17 +17,23 @@ data:
     num_workers: 4
     wrap: False
     train:
-      target: ldm.data.base.MSDDataset
+      target: ldm.data.base.TemplateMSDDataset
       params:
         split: train
         resize_to: null
-        name: msd_lung
+        max_size: 200
+        mapping:
+          2: 0
+        name: msd_hepaticvessel
     validation:
-      target: ldm.data.base.MSDDataset
+      target: ldm.data.base.TemplateMSDDataset
       params:
         split: val
         resize_to: null
-        name: msd_lung
+        max_size: 10
+        mapping:
+          2: 0
+        name: msd_hepaticvessel
 
 lightning:
   callbacks:

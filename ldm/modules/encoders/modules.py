@@ -371,8 +371,9 @@ class FrozenBERTEmbedder(AbstractEncoder):
 
 
 class IdentityEncoder(nn.Module):
-    def __init__(self, output_size=None, output_dtype='float'):
+    def __init__(self, input_size=None, output_size=None, output_dtype='float'):
         super().__init__()
+        self.input_size = omegaconf.OmegaConf.to_container(input_size)
         self.output_size = omegaconf.OmegaConf.to_container(output_size)
         self.dtype = torch.float32 if output_dtype == 'float' else torch.long
         
@@ -386,6 +387,14 @@ class IdentityEncoder(nn.Module):
         if self.dtype == torch.float32:
             return nn.functional.interpolate(tensor.float(), self.output_size, mode='trilinear' if tensor.ndim == 5 else 'bilinear').to(dtype)
         return nn.functional.interpolate(tensor.long(), self.output_size, mode='nearest').to(dtype)
+    
+    def decode(self, tensor: torch.Tensor):
+        if self.input_size is None:
+            return tensor
+        dtype = tensor.dtype
+        if self.dtype == torch.float32:
+            return nn.functional.interpolate(tensor.float(), self.input_size, mode='trilinear' if tensor.ndim == 5 else 'bilinear').to(dtype)
+        return nn.functional.interpolate(tensor.long(), self.input_size, mode='nearest').to(dtype)
     
     
 class HybridConditionEncoder(nn.Module):

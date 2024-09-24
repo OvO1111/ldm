@@ -4,11 +4,9 @@ import torch.nn.functional as F
 
 import math
 import random
-from einops import rearrange
-from functools import reduce, partial
-from ldm.util import instantiate_from_config
+from einops import rearrange, repeat
 from ldm.models.template import BasePytorchLightningTrainer
-from ldm.modules.diffusionmodules.openaimodel import UNetModel
+from ldm.modules.diffusionmodules.model import Downsample, Upsample, make_attn, checkpoint
 from torch.optim.lr_scheduler import LinearLR, LambdaLR
 import medpy.metric.binary as bin
 
@@ -67,7 +65,7 @@ class Segmentator(BasePytorchLightningTrainer):
         
     def get_input_train(self, images):
         # crop to patch
-        image = images[0]
+        image = images[1]
         output_size = self.image_size
         pw = max((output_size[0] - image.shape[1]) // 2 + 3, 0)
         ph = max((output_size[1] - image.shape[2]) // 2 + 3, 0)
@@ -75,15 +73,15 @@ class Segmentator(BasePytorchLightningTrainer):
         image = torch.nn.functional.pad(image, (pd, pd, ph, ph, pw, pw), mode='constant', value=0)
 
         (b, c, w, h, d) = image.shape
-        wl, wr = torch.where(torch.any(torch.any(image, 3), 3))[0][[0, -1]]
-        hl, hr = torch.where(torch.any(torch.any(image, 2), -1))[0][[0, -1]]
-        dl, dr = torch.where(torch.any(torch.any(image, 2), 2))[0][[0, -1]]
+        wl, wr = torch.where(torch.any(torch.any(image, 3), 3))[-1][[0, -1]]
+        hl, hr = torch.where(torch.any(torch.any(image, 2), -1))[-1][[0, -1]]
+        dl, dr = torch.where(torch.any(torch.any(image, 2), 2))[-1][[0, -1]]
         if wl > w - output_size[0]: w1 = random.randint(0, w-output_size[0])
         else: w1 = random.randint(wl, min(w - output_size[0], wr))
         if hl > h - output_size[1]: h1 = random.randint(0, h-output_size[1])
-        else: w1 = random.randint(hl, min(w - output_size[1], hr))
+        else: h1 = random.randint(hl, min(h - output_size[1], hr))
         if dl > d - output_size[2]: d1 = random.randint(0, d-output_size[2])
-        else: d1 = random.randint(dl, min(w - output_size[2], dr))
+        else: d1 = random.randint(dl, min(d - output_size[2], dr))
         
         padder = (lambda x: x) if pw + ph + pd == 0 else lambda x: torch.nn.functional.pad(x, (pd, pd, ph, ph, pw, pw), mode='constant', value=0)
         cropper = [slice(w1, w1 + output_size[0]), slice(h1, h1 + output_size[1]), slice(d1, d1 + output_size[2])]
@@ -111,6 +109,9 @@ class Segmentator(BasePytorchLightningTrainer):
                                    out_channels=self.num_classes,)
         elif model_name == 'unetpp':
             self.model = BasicUNetPlusPlus(self.dims, in_channels, self.num_classes,)
+        elif model_name == 'sin':
+            self.model = SinusoidalUNet(ch=16, ch_mult=(1, 2, 4, 8, 16), num_res_blocks=1, attn_resolutions=[], resolution=max(self.image_size),
+                                        in_channels=in_channels, out_ch=self.num_classes, dims=self.dims, nonlinearity=SinNonlinearity())
     
     def _multiclass_metrics(self, x, y, prefix=""):
         logs = {}
@@ -119,7 +120,7 @@ class Segmentator(BasePytorchLightningTrainer):
                 if (x == i).sum() == 0 or (y == i).sum() == 0: result = 0
                 else: result = getattr(bin, m, lambda *a: 0)(x == i, y == i)
                 logs[f"{prefix}/{m}/{i}"] = result
-            logs[f"{prefix}/{m}/mean"] = sum([logs[f"{prefix}/{m}/{j}"] for j in range(1, self.num_classes)]) / (self.num_classes - 1)
+            # logs[f"{prefix}/{m}/mean"] = sum([logs[f"{prefix}/{m}/{j}"] for j in range(1, self.num_classes)]) / (self.num_classes - 1)
         return logs
     
     def _dice_loss(self, x, y, is_y_one_hot=False, num_classes=-1):
@@ -128,9 +129,9 @@ class Segmentator(BasePytorchLightningTrainer):
         if not is_y_one_hot:
             y = rearrange(F.one_hot(y, num_classes), "b ... c -> b c ...")
         intersect = torch.sum(x * y)
+        x_sum = torch.sum(x * x)
         y_sum = torch.sum(y * y)
-        z_sum = torch.sum(x * x)
-        loss = 1 - (2 * intersect + smooth) / (z_sum + y_sum + smooth)
+        loss = 1 - (2 * intersect) / (x_sum + y_sum + smooth)
         return loss
     
     def _ce_loss(self, x, y, **kw):
@@ -141,7 +142,7 @@ class Segmentator(BasePytorchLightningTrainer):
         dice_loss = self._dice_loss(preds, y, one_hot_y, self.num_classes) 
             
         loss = ce_loss + dice_loss
-        return loss
+        return loss * 10
     
     def training_step(self, batch, batch_idx):
         loss_dict = {}
@@ -154,9 +155,9 @@ class Segmentator(BasePytorchLightningTrainer):
         loss = self.get_loss(model_outputs, seg, one_hot_y=0)
         loss_dict[f"{prefix}/loss"] = loss
         # metrics
-        metric_dict = self._multiclass_metrics(model_outputs.softmax(1).argmax(1).cpu().numpy(),
-                                                       seg.cpu().numpy(),
-                                                       prefix)
+        metric_dict = self._multiclass_metrics(model_outputs.argmax(1).cpu().numpy(),
+                                                seg.cpu().numpy(),
+                                                prefix)
         self.log_dict(metric_dict, logger=True, prog_bar=True, on_step=True, on_epoch=True)
         self.log_dict(loss_dict, prog_bar=True, on_step=True, on_epoch=True, logger=True)
         self.log("global_step", self.global_step, prog_bar=False, logger=True, on_step=True, on_epoch=False)
@@ -203,6 +204,7 @@ class Segmentator(BasePytorchLightningTrainer):
             images = torch.zeros_like(batch[self.image_key]) 
             segs = torch.zeros_like(batch[self.seg_key]) 
             model_outputs = torch.zeros_like(batch[self.seg_key]) 
+            
             for (image, seg), vertex in self.get_input(batch, self.image_key, self.seg_key):   
                 seg = seg.long()
                 images[:, :, 
@@ -231,3 +233,215 @@ class Segmentator(BasePytorchLightningTrainer):
         opt = torch.optim.SGD(self.parameters(), lr=self.learning_rate, momentum=0.9, weight_decay=0.0001)
         sch = LinearLR(opt, start_factor=1, end_factor=0, total_iters=self.trainer.max_epochs, verbose=1)
         return [opt], [sch]
+    
+    
+class SinusoidalUNet(nn.Module):
+    def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
+                 attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels, nonlinearity,
+                 resolution, use_linear_attn=False, attn_type="vanilla", dims=3):
+        super().__init__()
+        if use_linear_attn: attn_type = "linear"
+        self.ch = ch
+        self.out_ch = out_ch
+        self.num_resolutions = len(ch_mult)
+        self.num_res_blocks = num_res_blocks
+        self.resolution = resolution
+        self.in_channels = in_channels
+        self.conv_nd = getattr(nn, f"Conv{dims}d", nn.Identity)
+        self.batchnorm_nd = torch.nn.BatchNorm2d if dims == 2 else torch.nn.BatchNorm3d if dims == 3 else None
+        self.nonlinearity = nonlinearity
+        
+        # downsampling
+        self.conv_in = self.conv_nd(in_channels,
+                                    self.ch,
+                                    kernel_size=3,
+                                    stride=1,
+                                    padding=1)
+
+        curr_res = resolution
+        in_ch_mult = (1,)+tuple(ch_mult)
+        self.down = nn.ModuleList()
+        for i_level in range(self.num_resolutions):
+            block = nn.ModuleList()
+            attn = nn.ModuleList()
+            block_in = ch*in_ch_mult[i_level]
+            block_out = ch*ch_mult[i_level]
+            for i_block in range(self.num_res_blocks):
+                block.append(ResnetBlock(in_channels=block_in,
+                                         out_channels=block_out,
+                                         dropout=dropout, dims=dims, nonlinearity=nonlinearity))
+                block_in = block_out
+                if curr_res in attn_resolutions:
+                    attn.append(make_attn(block_in, attn_type=attn_type))
+            down = nn.Module()
+            down.block = block
+            down.attn = attn
+            if i_level != self.num_resolutions-1:
+                down.downsample = Downsample(block_in, resamp_with_conv)
+                curr_res = curr_res // 2
+            self.down.append(down)
+
+        # middle
+        self.mid = nn.Module()
+        self.mid.block_1 = ResnetBlock(in_channels=block_in,
+                                       out_channels=block_in,
+                                       dropout=dropout, dims=dims, nonlinearity=nonlinearity)
+        # self.mid.attn_1 = make_attn(block_in, attn_type=attn_type)
+        self.mid.block_2 = ResnetBlock(in_channels=block_in,
+                                       out_channels=block_in,
+                                       dropout=dropout, dims=dims, nonlinearity=nonlinearity)
+
+        # upsampling
+        self.up = nn.ModuleList()
+        for i_level in reversed(range(self.num_resolutions)):
+            block = nn.ModuleList()
+            attn = nn.ModuleList()
+            block_out = ch*ch_mult[i_level]
+            skip_in = ch*ch_mult[i_level]
+            for i_block in range(self.num_res_blocks+1):
+                if i_block == self.num_res_blocks:
+                    skip_in = ch*in_ch_mult[i_level]
+                block.append(ResnetBlock(in_channels=block_in+skip_in,
+                                         out_channels=block_out,
+                                         dropout=dropout, dims=dims, nonlinearity=nonlinearity))
+                block_in = block_out
+                if curr_res in attn_resolutions:
+                    attn.append(make_attn(block_in, attn_type=attn_type))
+            up = nn.Module()
+            up.block = block
+            up.attn = attn
+            if i_level != 0:
+                up.upsample = Upsample(block_in, resamp_with_conv)
+                curr_res = curr_res * 2
+            self.up.insert(0, up) # prepend to get consistent order
+
+        # end
+        self.norm_out = self.batchnorm_nd(block_in)
+        self.conv_out = self.conv_nd(block_in,
+                                     out_ch,
+                                     kernel_size=3,
+                                     stride=1,
+                                     padding=1)
+
+    def forward(self, x, context=None):
+        #assert x.shape[2] == x.shape[3] == self.resolution
+        if context is not None:
+            # assume aligned context, cat along channel axis
+            x = torch.cat((x, context), dim=1)
+
+        # downsampling
+        hs = [self.conv_in(x)]
+        for i_level in range(self.num_resolutions):
+            for i_block in range(self.num_res_blocks):
+                h = self.down[i_level].block[i_block](hs[-1])
+                if len(self.down[i_level].attn) > 0:
+                    h = self.down[i_level].attn[i_block](h)
+                hs.append(h)
+            if i_level != self.num_resolutions-1:
+                hs.append(self.down[i_level].downsample(hs[-1]))
+
+        # middle
+        h = hs[-1]
+        h = self.mid.block_1(h)
+        # h = self.mid.attn_1(h)
+        h = self.mid.block_2(h)
+
+        # upsampling
+        for i_level in reversed(range(self.num_resolutions)):
+            for i_block in range(self.num_res_blocks+1):
+                h = self.up[i_level].block[i_block](
+                    torch.cat([h, hs.pop()], dim=1))
+                if len(self.up[i_level].attn) > 0:
+                    h = self.up[i_level].attn[i_block](h)
+            if i_level != 0:
+                h = self.up[i_level].upsample(h)
+
+        # end
+        h = self.norm_out(h)
+        h = self.nonlinearity(h)
+        h = self.conv_out(h)
+        return h
+
+    def get_last_layer(self):
+        return self.conv_out.weight
+    
+    
+class ResnetBlock(nn.Module):
+    def __init__(self, *, in_channels, out_channels=None, conv_shortcut=False,
+                 dropout, dims=3, nonlinearity):
+        super().__init__()
+        self.in_channels = in_channels
+        out_channels = in_channels if out_channels is None else out_channels
+        self.out_channels = out_channels
+        self.use_conv_shortcut = conv_shortcut
+        self.conv_nd = torch.nn.Conv2d if dims == 2 else torch.nn.Conv3d if dims == 3 else None
+        self.batchnorm_nd = torch.nn.BatchNorm2d if dims == 2 else torch.nn.BatchNorm3d if dims == 3 else None
+
+        self.norm1 = self.batchnorm_nd(in_channels)
+        self.conv1 = self.conv_nd(in_channels,
+                                     out_channels,
+                                     kernel_size=3,
+                                     stride=1,
+                                     padding=1)
+        self.norm2 = self.batchnorm_nd(out_channels)
+        self.dropout = torch.nn.Dropout(dropout)
+        self.conv2 = self.conv_nd(out_channels,
+                                     out_channels,
+                                     kernel_size=3,
+                                     stride=1,
+                                     padding=1)
+        self.nonlin1 = nonlinearity
+        self.nonlin2 = nonlinearity
+        if self.in_channels != self.out_channels:
+            if self.use_conv_shortcut:
+                self.conv_shortcut = self.conv_nd(in_channels,
+                                                     out_channels,
+                                                     kernel_size=3,
+                                                     stride=1,
+                                                     padding=1)
+            else:
+                self.nin_shortcut = self.conv_nd(in_channels,
+                                                    out_channels,
+                                                    kernel_size=1,
+                                                    stride=1,
+                                                    padding=0)
+    
+    def forward(self, x):
+        return checkpoint(self._forward, (x,), self.parameters(), True)
+
+    def _forward(self, x):
+        h = x
+        h = self.norm1(h)
+        h = self.nonlin1(h)
+        h = self.conv1(h)
+
+        h = self.norm2(h)
+        h = self.nonlin2(h)
+        h = self.dropout(h)
+        h = self.conv2(h)
+
+        if self.in_channels != self.out_channels:
+            if self.use_conv_shortcut:
+                x = self.conv_shortcut(x)
+            else:
+                x = self.nin_shortcut(x)
+
+        return x+h
+
+
+class SinNonlinearity(nn.Module):
+    def __init__(self, sinwave=10):
+        self.waves = sinwave
+        super().__init__()
+        self.conv = torch.nn.Conv1d(self.waves, 1, 1)
+        self.freq = nn.Parameter(torch.ones((self.waves,)), requires_grad=True)
+    
+    def forward(self, inputs):
+        b, c, h, w, d = inputs.shape
+        inputs = rearrange(inputs, 'b ... -> b 1 (...)')
+        inputs = repeat(inputs, 'b d z -> b (d f) z', f=self.waves)
+        inputs = torch.einsum('bfz,f->bfz', inputs, self.freq).sin()
+        inputs = self.conv(inputs)
+        outputs = rearrange(inputs[:, 0], 'b (c h w d) -> b c h w d', c=c, h=h, w=w, d=d)
+        return outputs
+            

@@ -255,9 +255,9 @@ class TorchioForegroundCropper(tio.transforms.Transform):
                 if wl > w - output_size[0]: w1 = random.randint(0, w-output_size[0])
                 else: w1 = random.randint(wl, min(w - output_size[0], wr))
                 if hl > h - output_size[1]: h1 = random.randint(0, h-output_size[1])
-                else: h1 = random.randint(hl, min(w - output_size[1], hr))
+                else: h1 = random.randint(hl, min(h - output_size[1], hr))
                 if dl > d - output_size[2]: d1 = random.randint(0, d-output_size[2])
-                else: d1 = random.randint(dl, min(w - output_size[2], dr))
+                else: d1 = random.randint(dl, min(d - output_size[2], dr))
             else:
                 w1 = np.random.randint(0, w - output_size[0])
                 h1 = np.random.randint(0, h - output_size[1])
