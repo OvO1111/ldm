@@ -11,7 +11,7 @@ model:
     concat_key: null
     crossattn_key: null
     monitor: val/loss
-    ckpt_path: /ailab/user/dailinrui/data/ldm/brats21_cdm_128_128_128_fine_ft/checkpoints/last.ckpt
+    ckpt_path: /ailab/user/dailinrui/data/ldm/brats21_cdm_128_128_128_fine_ft/checkpoints/last-v1.ckpt
     # ignore_keys: [model.diffusion_model.input_blocks.0.0.weight, model.diffusion_model.input_blocks.0.0.bias, model.diffusion_model.out.2.weight, model.diffusion_model.out.2.bias]
 
     unet_config:
@@ -78,10 +78,6 @@ lightning:
     image_logger:
       target: main.ImageLogger
       params:
-        train_batch_frequency: 100
-        val_batch_frequency: 1
-        test_batch_frequency: 1
-        max_images: 10
         logger:
           inputs: 
             target: mask_rescale

@@ -4,7 +4,7 @@ compr
 
 # ignore slurm runs
 run/
-data_ln/
+data_ln
 runs/
 wandb/
 

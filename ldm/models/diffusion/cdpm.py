@@ -2,9 +2,10 @@
 import pytorch_lightning as pl
 import numpy as np
 import einops
+import os
 import torch
 import torch.nn as nn
-from collections.abc import Iterable
+import SimpleITK as sitk
 from tqdm import tqdm
 from einops import rearrange
 from ldm.util import instantiate_from_config
@@ -406,4 +407,5 @@ class DiffusionWrapper(pl.LightningModule):
         else:
             raise NotImplementedError()
 
-        return out
+        return out                
+            

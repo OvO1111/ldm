@@ -13,8 +13,9 @@ from ldm.data.utils import TorchioForegroundCropper, TorchioBaseResizer, \
     load_or_write_split, identity, window_norm
 
 
-class GenDataset(Dataset):
+class GenDatasetForEnsemble(Dataset):
     def __init__(self, include_case=None, resize_to=(128, 128, 128), max_size=None, **kw):
+        super().__init__()
         totalseg_gen = "/ailab/user/dailinrui/data/ccdm_pl/ensemblev2_128_128_128_anatomical/dataset/samples"
         tumorseg_gen = "/ailab/user/dailinrui/data/datasets/ensemble/val/"
         mapping = "/ailab/user/dailinrui/data/datasets/ensemble/mapping.json"
@@ -68,6 +69,39 @@ class GenDataset(Dataset):
         sample.update({k: getattr(subject, k).data for k in subject.keys()})
         sample['totalseg'] = torch.tensor(totalseg[None])
         sample.update({"cond": torch.cat([sample['totalseg'], sample['mask']], dim=0)})
+        return sample
+    
+    
+class GenDatasetForMSD(Dataset):
+    def __init__(self, 
+                 base,
+                 resize_to=(128, 128, 128),
+                 max_size=None,
+                 gen_field="image",
+                 dummy_fields=[]):
+        self.data = [os.path.join(base, _) for _ in os.listdir(base)][:max_size]
+        self.gen_field = gen_field
+        self.dummy_fields = dummy_fields
+        self.transforms = dict(
+            resize=tio.Resize(resize_to) if resize_to is not None else tio.Lambda(identity),
+            normalize=tio.RescaleIntensity(in_min_max=(0, 3), out_min_max=(0, 1)),
+        )
+        
+    def __len__(self): return len(self.data)
+    
+    def read_nifti(self, x):
+        return sitk.GetArrayFromImage(sitk.ReadImage(x))
+    
+    def __getitem__(self, idx):
+        item = self.read_nifti(self.data[idx])[None]
+        dummy = np.zeros_like(item, dtype=np.float32).repeat(4, 0)
+        subject = tio.Subject(**({self.gen_field: tio.ScalarImage(tensor=item)} | {field: tio.ScalarImage(tensor=dummy) for field in self.dummy_fields}))
+        subject = self.transforms["resize"](subject)
+        subject = self.transforms["normalize"](subject)
+        # random aug
+        subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
+        sample = {k: getattr(subject, k).data for k in subject.keys()}
+        sample = sample | {"cond": torch.cat([sample[self.gen_field], (sample[self.gen_field] > 0).float()], dim=0)}
         return sample
     
 

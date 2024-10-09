@@ -9,12 +9,14 @@ import numpy as np
 import SimpleITK as sitk
 import scipy.ndimage as ndm
 
-from enum import IntEnum
 from tqdm import tqdm
+from enum import IntEnum
 from medpy.metric import binary
+from collections import defaultdict
 from einops import rearrange, repeat
 from ldm.data.utils import load_or_write_split
 from ldm.util import instantiate_from_config
+from pytorch_lightning.utilities.distributed import rank_zero_only
 from ldm.models.autoencoder import AutoencoderKL, VQModelInterface
 from ldm.models.diffusion.ddpm import LatentDiffusion
 from ldm.models.diffusion.cdpm import CategoricalDiffusion, OneHotCategoricalBCHW
@@ -28,6 +30,29 @@ from ldm.modules.diffusionmodules.util import extract_into_tensor
 def exists(x):
     return x is not None
 
+
+def save_helper(fn):
+    def _fn(*args, **kw):
+        save_dict = fn(*args, **kw)
+        
+        for suffix, data_dict in save_dict.items():
+            if suffix.endswith('npy'): 
+                for key, (path, data) in data_dict.items():
+                    np.save(path, data)
+            if suffix.endswith('nii.gz'):
+                for key, (path, data) in data_dict.items():
+                    sitk.WriteImage(sitk.GetImageFromArray(data), path)
+            path = list(data_dict.keys())[0]
+            if suffix.endswith('npz'):
+                npz_parent = os.path.join(os.path.dirname(os.path.dirname(path)), 'npz')
+                np.savez(npz_parent, **{key: data for key, (path, data) in data_dict.items()})
+            if suffix.endswith('h5'):
+                h5_parent = os.path.join(os.path.dirname(os.path.dirname(path)), 'h5')
+                h5 = h5py.File(h5_parent, 'w')
+                for key, (path, data) in data_dict.items():
+                    h5.create_dataset(key, data=data)
+                h5.close()
+    return _fn
 
 class print_once:
     counter = 0
@@ -155,60 +180,114 @@ class ComputeMetrics:
 class MakeDataset:
     def __init__(self, 
                  dataset_base,
-                 include_keys,
-                 suffixes,
-                 bs=1, create_split=False, dims=3, desc=None, overwrite=False):
-        self.bs = bs
+                 suffix_keys,
+                 create_split=False, dims=3, desc=None, overwrite=False):
         self.dims = dims
         self.desc = desc
         self.base = dataset_base
-        self.suffixes = suffixes
-        self.include_keys = include_keys
+        self.suffix_keys = suffix_keys
         self.create_split = create_split
         self.overwrite = False
         
-        self.dataset = dict()
+        self.dataset = defaultdict(dict)
         
-    def add(self, samples, sample_names=None, dtypes={}):
-        if not exists(sample_names): sample_names = [f"case_{len(self.dataset) + i}" for i in range(self.bs)]
+        for key, suffix in self.suffix_keys.items():
+            if suffix not in ['raw', 'npz', 'h5']:
+                os.makedirs(os.path.join(self.base, key), exist_ok=True)
+            elif suffix in ['npz', 'h5']:
+                os.makedirs(os.path.join(self.base, suffix), exist_ok=True)
+        
+    def __add_version(self, olds, new, is_file=False):
+        if new in olds or os.path.basename(new) in olds:
+            if is_file:
+                # olds: os.listdir, new: os.path.abspath
+                dirname = os.path.dirname(new)
+                mtime = [(file, os.path.getmtime(os.path.join(dirname, file))) for file in olds if file.startswith(new.split('.')[0])]
+                max_time_file = max(mtime, key=lambda x: x[1])[0]
+                if 'version' in max_time_file: 
+                    maxtime = int(max_time_file.split('.')[0][max_time_file.find('version') + len("version"):])
+                else: maxtime = 0
+                new = os.path.join(dirname, new.split('.')[0] + f"_version{maxtime + 1}" + ".".join(new.split('.')[1:]))
+            else:
+                mpath = [(x, int(x.split('.')[0][x.find('version') + len('version'):]) if 'version' in x else 0) for x in olds if x.startswith(new.split('.')[0])]
+                max_version = max(mpath, key=lambda x: x[1])[1]
+                new = new.split('.')[0] + f'_version{max_version + 1}' + ".".join(new.split('.')[1:])
+        return new
+    
+    @save_helper 
+    def add(self, samples, sample_names=None, dtypes={}, nb=1):
+        if not exists(sample_names): sample_names = [f"case_{len(self.dataset) + i}" for i in range(nb)]
         if isinstance(sample_names, str): sample_names = [sample_names]
-        for i in range(len(sample_names)): 
-            while sample_names[i] in self.dataset: sample_names[i] = sample_names[i] + "0"
-            self.dataset[sample_names[i]] = {}
         
-        for key in self.include_keys:
-            value = samples[key]
-            for b in range(self.bs):
-                sample_name_b = sample_names[b]
-                if not isinstance(value, dict):
-                    value = {"value": value}
-                for k, v in value.items():
-                    value_b = v[b]
-                    k = "_".join([key, k])
-                    if isinstance(value_b, torch.Tensor):
-                        suffix = self.suffixes.get(key, self.suffixes.get(k, ""))
-                        f = os.path.join(self.base, k, sample_name_b + suffix)
-                        os.makedirs(os.path.dirname(f), exist_ok=True)
-                        if os.path.exists(f) and not self.overwrite:
-                            time = [(file, os.path.getmtime(os.path.join(os.path.dirname(f), file))) for file in os.listdir(os.path.dirname(f))]
-                            maxtimefile = max(time, key=lambda x: x[1])[0]
-                            if maxtimefile[-len(suffix) - 2] == 'v': 
-                                maxtime = int(maxtimefile[-len(suffix) - 1])
-                            else: maxtime = 0
-                            f = f.replace(suffix, f'_v{maxtime + 1}' + suffix)
-                            # print(f"found existent file, saving new one at {f}. if this is not desired, u can set MakeDataset().overwrite to be True")
-                        im = value_b.cpu().data.numpy().astype(dtypes.get(key, np.float32))
-                        if suffix == '.nii.gz':
-                            assert im.ndim == self.dims + 1, f"desired ndim {self.dims} and actual ndim {im.shape} not match"
-                            sitk.WriteImage(sitk.GetImageFromArray(rearrange(self.postprocess(im), "c ... -> ... c")), f)
-                            continue
-                        elif suffix == '.npy':
-                            np.save(f, im)
-                            continue
-                        self.dataset[sample_name_b][k] = "not saved"
-                    else:
-                        self.dataset[sample_name_b][k] = value_b
-        return 
+        # handle batch dim
+        if nb > 1:
+            if len(sample_names) == 1:
+                for b in range(nb):
+                    self.add({k: v[b] for k, v in samples.items()}, sample_names, dtypes, nb=1)
+            elif len(sample_names) < nb:
+                print(f'expected {nb} sample names, got {sample_names}')
+                for b in range(nb):
+                    self.add({k: v[b] for k, v in samples.items()}, [sample_names[0]], dtypes, nb=1)
+            else:
+                for b in range(nb):
+                    self.add({k: v[b] for k, v in samples.items()}, [sample_names[b]], dtypes, nb=1)
+
+        for i in range(len(sample_names)): 
+            if sample_names[i] in self.dataset: 
+                sample_names[i] = self.__add_version(list(self.dataset.keys()), sample_names[i])
+                
+        # samples: {key1: data1, ...}
+        ret_dict = defaultdict(dict)
+        for key, suffix in self.suffix_keys.items():
+            data = samples[key]
+            if isinstance(data, torch.Tensor):
+                if data.ndim == 5:
+                    assert data.shape[0] == 1
+                    data = data[0]
+                if data.ndim == 4:
+                    data = rearrange(data, 'c ... -> ... c')
+                data = data.cpu().numpy().astype(dtypes.get(key, np.float32))
+                path = os.path.join(self.base, key, sample_names[0] + suffix)
+                path = self.__add_version(os.listdir(os.path.join(self.base, key)), path, is_file=True)
+                ret_dict[suffix][key] = (path, data)
+                self.dataset[sample_names[0]][key] = path
+                
+            elif isinstance(data, (str, tuple, list, dict)) and suffix == 'raw':
+                self.dataset[sample_names[0]][key] = str(data)
+            
+        # for key in self.include_keys:
+        #     value = samples[key]
+        #     for b in range(self.bs):
+        #         sample_name_b = sample_names[b]
+        #         if not isinstance(value, dict):
+        #             value = {"value": value}
+        #         for k, v in value.items():
+        #             value_b = v[b]
+        #             k = "_".join([key, k])
+        #             if isinstance(value_b, torch.Tensor):
+        #                 suffix = self.suffixes.get(key, self.suffixes.get(k, ""))
+        #                 f = os.path.join(self.base, k, sample_name_b + suffix)
+        #                 os.makedirs(os.path.dirname(f), exist_ok=True)
+        #                 if os.path.exists(f) and not self.overwrite:
+        #                     time = [(file, os.path.getmtime(os.path.join(os.path.dirname(f), file))) for file in os.listdir(os.path.dirname(f)) if file.startswith(f.split('.')[0])]
+        #                     maxtimefile = max(time, key=lambda x: x[1])[0]
+        #                     if 'version' in maxtimefile: 
+        #                         maxtime = int(maxtimefile.split('.')[0][maxtimefile.find('version') + len("version"):])
+        #                     else: maxtime = 0
+        #                     f = f.replace(suffix, f'_version{maxtime + 1}{suffix}')
+        #                     # print(f"found existent file, saving new one at {f}. if this is not desired, u can set MakeDataset().overwrite to be True")
+        #                 im = value_b.cpu().data.numpy().astype(dtypes.get(key, np.float32))
+        #                 if suffix == '.nii.gz':
+        #                     assert im.ndim == self.dims + 1, f"desired ndim {self.dims} and actual ndim {im.shape} not match"
+        #                     sitk.WriteImage(sitk.GetImageFromArray(rearrange(self.postprocess(im), "c ... -> ... c")), f)
+        #                     continue
+        #                 elif suffix == '.npy':
+        #                     np.save(f, im)
+        #                     continue
+        #                 self.dataset[sample_name_b][k] = "not saved"
+        #             else:
+        #                 self.dataset[sample_name_b][k] = value_b
+        return ret_dict
                     
     def postprocess(self, sample):
         # c h w d
@@ -216,12 +295,12 @@ class MakeDataset:
         
     def finalize(self, dt=None, **kw):
         dataset = {} | kw
-        collect_dt = self.dataset if dt is None else dt
+        collect_dt = self.dataset if dt is not None else dt
         dataset["data"] = collect_dt
         dataset["desc"] = self.desc
-        dataset["keys"] = omegaconf.OmegaConf.to_container(self.include_keys)
+        dataset["keys"] = omegaconf.OmegaConf.to_container(self.suffix_keys)
         dataset["length"] = len(collect_dt)
-        dataset["format"] = {k: self.suffixes.get(k, "raw") for k, v in self.suffixes.items()}
+        dataset["format"] = {k: self.suffix_keys.get(k, "raw") for k, v in self.suffix_keys.items()}
         
         if self.create_split:
             keys = list(collect_dt.keys())
@@ -268,13 +347,12 @@ class InferAutoencoderVQ(VQModelInterface, ComputeMetrics, MakeDataset):
                  eval_scheme=[1],
                  save_dataset=False,
                  save_dataset_path=None,
-                 include_keys=["image"],
                  suffix_keys={"image":".nii.gz",},
                  **diffusion_kwargs):
         if save_dataset:
             self.save_dataset = save_dataset
             assert exists(save_dataset_path)
-            MakeDataset.__init__(self, save_dataset_path, include_keys, suffix_keys)
+            MakeDataset.__init__(self, save_dataset_path, suffix_keys)
         VQModelInterface.__init__(self, **diffusion_kwargs)
         ComputeMetrics.__init__(self, eval_scheme)
         self.eval()
@@ -311,13 +389,12 @@ class InferLatentDiffusion(LatentDiffusion, ComputeMetrics, MakeDataset):
                  eval_scheme=[1],
                  save_dataset=False,
                  save_dataset_path=None,
-                 include_keys=["data", "text"],
                  suffix_keys={"data":".nii.gz",},
                  **diffusion_kwargs):
         if save_dataset:
             self.save_dataset = save_dataset
             assert exists(save_dataset_path)
-            MakeDataset.__init__(self, save_dataset_path, include_keys, suffix_keys)
+            MakeDataset.__init__(self, save_dataset_path, suffix_keys)
         LatentDiffusion.__init__(self, **diffusion_kwargs)
         ComputeMetrics.__init__(self, eval_scheme)
         self.eval()
@@ -355,7 +432,6 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
                  eval_scheme=[1],
                  save_dataset=False,
                  save_dataset_path=None,
-                 include_keys=["data", "text"],
                  suffix_keys={"data":".nii.gz",},
                  **diffusion_kwargs):
         CategoricalDiffusion.__init__(self, **diffusion_kwargs)
@@ -363,7 +439,7 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
         self.save_dataset = save_dataset
         if save_dataset:
             assert exists(save_dataset_path)
-            MakeDataset.__init__(self, save_dataset_path, include_keys, suffix_keys)
+            MakeDataset.__init__(self, save_dataset_path, suffix_keys)
         self.eval()
     
     def on_test_start(self, *args):
@@ -372,10 +448,13 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
         if MetricType.fvd in self.eval_scheme:
             self.fvd = self.fvd.to(self.device)
     
+    @rank_zero_only
     def on_test_end(self, *args):
         if self.save_dataset:
-            datasets = torch.distributed.gather_object(self.dataset)
-            metrics = torch.distributed.gather_object(self.metrics)
+            # datasets = torch.distributed.gather_object(self.dataset)
+            # metrics = torch.distributed.gather_object(self.metrics)
+            datasets = self.dataset
+            metrics = [self.metrics]
             mean_metrics = {"mean_metrics": {m: np.mean([c[m] for c in metrics]) for m in metrics[0].keys()},
                             "ind_metrics": metrics}
             self.finalize(datasets, mean_metrics)

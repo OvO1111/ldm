@@ -32,8 +32,8 @@
             "name": "debug latentdiffusion-testtime",
             "type": "debugpy",
             "request": "launch",
-            "program": "./test.py",
-            "args": ["-b", "./configs/latent-diffusion/guidegen_ldm_test.yaml", "--gpus", "0,", "--name", "test", "--debug"],
+            "program": "./main.py",
+            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm.yaml", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {

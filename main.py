@@ -3,6 +3,7 @@ import numpy as np
 import time
 import torch
 import wandb
+import signal
 import shutil
 import pytorch_lightning as pl
 
@@ -30,6 +31,21 @@ def exists(x):
 
 def default(x, defval=None):
     return x if x is not None else defval
+
+
+# allow checkpointing via USR1
+def melk(*args, **kwargs):
+    # run all checkpoint hooks
+    if trainer.global_rank == 0:
+        print("Summoning checkpoint.")
+        ckpt_path = os.path.join(ckptdir, "last.ckpt")
+        trainer.save_checkpoint(ckpt_path)
+
+
+def divein(*args, **kwargs):
+    if trainer.global_rank == 0:
+        import pdb;
+        pdb.set_trace()
 
 
 def get_parser(**parser_kwargs):
@@ -164,9 +180,14 @@ def worker_init_fn(_):
 
 
 class DataModuleFromConfig(pl.LightningDataModule):
-    def __init__(self, batch_size, train=None, validation=None,
-                 wrap=False, num_workers=None, use_worker_init_fn=False,
-                 shuffle_val_dataloader=False, batch_sampler=None):
+    def __init__(self, 
+                 batch_size, 
+                 train=None, validation=None, test=None,
+                 wrap=False, 
+                 num_workers=None, 
+                 use_worker_init_fn=False,
+                 shuffle_val_dataloader=False, shuffle_test_dataloader=False, 
+                 batch_sampler=None):
         super().__init__()
         self.batch_size = batch_size
         self.dataset_configs = dict()
@@ -178,9 +199,14 @@ class DataModuleFromConfig(pl.LightningDataModule):
         if validation is not None:
             self.dataset_configs["validation"] = validation
             self.val_dataloader = partial(self._val_dataloader, shuffle=shuffle_val_dataloader)
+        if test is not None:
+            self.dataset_configs["test"] = test
+            self.test_dataloader = partial(self._test_dataloader, shuffle=shuffle_test_dataloader)
         self.wrap = wrap
+        self.init_fn = worker_init_fn if use_worker_init_fn else None
         self.has_batch_sampler = batch_sampler is not None
         self.batch_sampler_config = batch_sampler
+        self.use_sampler_on_ds = [] if not self.has_batch_sampler else batch_sampler["params"].get("dataset", [])
 
     def prepare_data(self):
         for data_cfg in self.dataset_configs.values():
@@ -210,53 +236,43 @@ class DataModuleFromConfig(pl.LightningDataModule):
             raise NotImplementedError()
 
     def _train_dataloader(self):                
-        if self.use_worker_init_fn:
-            init_fn = worker_init_fn
-        else:
-            init_fn = None
-        if not self.has_batch_sampler:
+        use_batch_sampler = self.has_batch_sampler and 'train' in self.use_sampler_on_ds
+        if not use_batch_sampler:
             return DataLoader(self.datasets["train"],
                               batch_size=self.batch_size,
                               num_workers=self.num_workers,
-                              worker_init_fn=init_fn,
+                              worker_init_fn=self.init_fn,
                               shuffle=True, 
                               collate_fn=getattr(self.datasets["train"], "collate", _utils.collate.default_collate))
         else:
             return DataLoader(self.datasets["train"],
                               batch_sampler=self.batch_sampler,
                               num_workers=self.num_workers,
-                              worker_init_fn=init_fn,
+                              worker_init_fn=self.init_fn,
                               collate_fn=getattr(self.datasets["train"], "collate", _utils.collate.default_collate))
 
     def _val_dataloader(self, shuffle=False, batch_size=None):
-        if self.use_worker_init_fn:
-            init_fn = worker_init_fn
-        else:
-            init_fn = None
         return DataLoader(self.datasets["validation"],
                             batch_size=self.batch_size if batch_size is None else batch_size,
                             num_workers=self.num_workers,
-                            worker_init_fn=init_fn,
+                            worker_init_fn=self.init_fn,
                             shuffle=shuffle, 
                             collate_fn=getattr(self.datasets["validation"], "collate", _utils.collate.default_collate))
         
     def _test_dataloader(self, shuffle=False):
-        if self.use_worker_init_fn:
-            init_fn = worker_init_fn
-        else:
-            init_fn = None
-        if not self.has_batch_sampler:
+        use_batch_sampler = self.has_batch_sampler and 'train' in self.use_sampler_on_ds
+        if not use_batch_sampler:
             return cycle(DataLoader(self.datasets["test"],
                                     batch_size=self.batch_size,
                                     num_workers=self.num_workers,
-                                    worker_init_fn=init_fn,
+                                    worker_init_fn=self.init_fn,
                                     shuffle=shuffle, 
                                     collate_fn=getattr(self.datasets["test"], "collate", _utils.collate.default_collate)))
         else:
             return cycle(DataLoader(self.datasets["test"],
                                     batch_sampler=self.batch_sampler,
                                     num_workers=self.num_workers,
-                                    worker_init_fn=init_fn,
+                                    worker_init_fn=self.init_fn,
                                     collate_fn=getattr(self.datasets["test"], "collate", _utils.collate.default_collate)))
     
     def _predict_dataloader(self, shuffle=False):
@@ -339,8 +355,6 @@ class ImageLogger(Callback):
         
         self.is_training = is_training
         assert exists(train_batch_frequency) or exists(test_batch_frequency)
-        if self.batch_freq_tr is None and self.batch_freq_val is None and self.batch_freq_te is not None:
-            self.is_training = False
         assert (is_training and exists(train_batch_frequency)) or (not is_training and exists(test_batch_frequency))
         self.max_images = max_images
         self.logger_log_images = {
@@ -428,6 +442,7 @@ class ImageLogger(Callback):
                 pl_module.eval()
             with torch.no_grad():
                 images = pl_module.log_images(batch, split=split, **self.log_images_kwargs)
+                if isinstance(images, tuple): metrics, images = images
 
             for k in images:
                 if isinstance(images[k], torch.Tensor):
@@ -465,19 +480,19 @@ class ImageLogger(Callback):
         return False
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if not self.is_training and (pl_module.global_step > 0 or self.log_first_step):
+        if self.is_training and (pl_module.global_step > 0 or self.log_first_step):
             self.log_img(pl_module, batch, batch_idx, split="train")
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        if not self.is_training and pl_module.global_step > 0:
+        if self.is_training and pl_module.global_step > 0:
             self.log_img(pl_module, batch, batch_idx, split="val")
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        if not self.disabled:
+        if not self.is_training:
             self.log_img(pl_module, batch, batch_idx, split="test")
             
     def on_predict_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        if not self.disabled:
+        if not self.is_training:
             self.log_img(pl_module, batch, batch_idx, split="test")
 
 
@@ -489,7 +504,6 @@ class CUDACallback(Callback):
         torch.cuda.synchronize(trainer.root_gpu)
         self.start_time = time.time()
 
-    def on_train_epoch_end(self, trainer, pl_module):
     def on_train_epoch_end(self, trainer, pl_module):
         torch.cuda.synchronize(trainer.root_gpu)
         max_memory = torch.cuda.max_memory_allocated(trainer.root_gpu) / 2 ** 20
@@ -578,6 +592,8 @@ if __name__ == "__main__":
         lightning_config.trainer = trainer_config
 
         # model
+        config.model['target'] = config.model.get('train_target' if opt.train else 'test_target', 'target')
+        config.model['params'] = OmegaConf.merge(config.model['params'], config.model.get('train_only_params' if opt.train else 'test_only_params', {}))
         model = instantiate_from_config(config.model)
 
         # trainer and callbacks
@@ -661,6 +677,16 @@ if __name__ == "__main__":
             "cuda_callback": {
                 "target": "main.CUDACallback"
             },
+            "image_logger": {
+                "target": "main.ImageLogger",
+                "params": {
+                    "train_batch_frequency": 100,
+                    "val_batch_frequency": 1,
+                    "test_batch_frequency": 1,
+                    "max_images": 10,
+                    "is_training": opt.train
+                }
+            }
         }
         if version.parse(pl.__version__) >= version.parse('1.4.0'):
             default_callbacks_cfg.update({'checkpoint_callback': modelckpt_cfg})
@@ -731,28 +757,9 @@ if __name__ == "__main__":
             model.learning_rate = base_lr
             print("++++ NOT USING LR SCALING ++++")
             print(f"Setting learning rate to {model.learning_rate:.2e}")
-
-
-        # allow checkpointing via USR1
-        def melk(*args, **kwargs):
-            # run all checkpoint hooks
-            if trainer.global_rank == 0:
-                print("Summoning checkpoint.")
-                ckpt_path = os.path.join(ckptdir, "last.ckpt")
-                trainer.save_checkpoint(ckpt_path)
-
-
-        def divein(*args, **kwargs):
-            if trainer.global_rank == 0:
-                import pdb;
-                pdb.set_trace()
-
-
-        import signal
-
+                
         signal.signal(signal.SIGUSR1, melk)
         signal.signal(signal.SIGUSR2, divein)
-        
         # create necessary folders
         os.makedirs(ckptdir, exist_ok=True)
         os.makedirs(cfgdir, exist_ok=True)
@@ -766,7 +773,8 @@ if __name__ == "__main__":
                 melk()
                 raise
         else:
-            trainer.test(model, data)
+            trainer: Trainer
+            trainer.test(model, data.test_dataloader())
         # if not opt.no_test and not trainer.interrupted:
         #     trainer.test(model, data)
     except Exception:

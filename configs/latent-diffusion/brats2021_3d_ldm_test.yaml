@@ -1,6 +1,6 @@
 model:
   base_learning_rate: 2.0e-05
-  target: inference.models.InferMixedDiffusion
+  target: inference.models.InferLatentDiffusion
   params:
     linear_start: 0.0015
     linear_end: 0.0195
@@ -16,8 +16,8 @@ model:
     cond_stage_trainable: false
     # mix_scheme: latent
     # ckpt_path: /ailab/user/dailinrui/data/ldm/brats21_ldm_cvq_128_128_128/checkpoints/epoch=000921.ckpt
-    mix_scheme: vq
-    ckpt_path: /ailab/user/dailinrui/data/ldm/brats21fg_cvq_64_64_64/checkpoints/last.ckpt
+    # mix_scheme: vq
+    # ckpt_path: /ailab/user/dailinrui/data/ldm/brats21fg_cvq_64_64_64/checkpoints/last.ckpt
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
@@ -79,9 +79,10 @@ model:
 
     save_dataset: true 
     save_dataset_path: /ailab/user/dailinrui/data/ldm/brats21_ldm_cvq_128_128_128/dataset
-    include_keys: [image, label, premix, premix_label, mixed_samples, mixed_fine]
+    include_keys: [image, label]
     suffix_keys: 
-      data: .h5
+      image: .nii.gz
+      label: .nii.gz
 
     eval_scheme: [1, 3]
 
@@ -103,24 +104,17 @@ data:
       #   n_fine: 10
       #   split: train
       #   crop_to: [128, 128, 128]
-      target: ldm.data.brats2021.BraTS2021_3DFG
+      target: ldm.data.base.GenDatasetForMSD
       params:
-        n_fine: 10
-        split: train
-        crop_to: [64, 64, 64]
+        crop_to: [128, 128, 128]
+        gen_field: mask
+        dummy_fields: [image, ]
 
 lightning:
   callbacks:
     image_logger:
-      target: test.ImageLogger
+      target: main.ImageLogger
       params:
-        test_batch_frequency: 1
-        max_images: -1
-        log_separate: false
-        clamp: false
-        log_images_kwargs:
-          verbose: true
-          alpha: .2
         logger:
           inputs: 
             target: image_rescale
