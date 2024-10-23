@@ -18,8 +18,7 @@ from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
-from pytorch_lightning.utilities.distributed import rank_zero_only
-from pytorch_lightning.utilities import rank_zero_info
+from pytorch_lightning.utilities import rank_zero_only, rank_zero_info
 
 from ldm.util import instantiate_from_config, get_obj_from_str
 from inference.utils import TwoStreamBatchSampler, DistributedTwoStreamBatchSampler, image_logger, visualize, combine_mask_and_im_v2
@@ -44,7 +43,7 @@ def melk(*args, **kwargs):
 
 def divein(*args, **kwargs):
     if trainer.global_rank == 0:
-        import pdb;
+        import pdb
         pdb.set_trace()
 
 
@@ -95,19 +94,6 @@ def get_parser(**parser_kwargs):
         default=False,
         nargs="?",
         help="train",
-    )
-    parser.add_argument(
-        "--no-test",
-        type=str2bool,
-        const=True,
-        default=False,
-        nargs="?",
-        help="disable test",
-    )
-    parser.add_argument(
-        "-p",
-        "--project",
-        help="name of new or path to existing project"
     )
     parser.add_argument(
         "-d",
@@ -181,7 +167,7 @@ def worker_init_fn(_):
 
 class DataModuleFromConfig(pl.LightningDataModule):
     def __init__(self, 
-                 batch_size, 
+                 batch_size, test_batch_size=1,
                  train=None, validation=None, test=None,
                  wrap=False, 
                  num_workers=None, 
@@ -190,6 +176,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
                  batch_sampler=None):
         super().__init__()
         self.batch_size = batch_size
+        self.test_batch_size = test_batch_size
         self.dataset_configs = dict()
         self.num_workers = num_workers if num_workers is not None else batch_size * 2
         self.use_worker_init_fn = use_worker_init_fn
@@ -263,7 +250,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
         use_batch_sampler = self.has_batch_sampler and 'train' in self.use_sampler_on_ds
         if not use_batch_sampler:
             return cycle(DataLoader(self.datasets["test"],
-                                    batch_size=self.batch_size,
+                                    batch_size=self.test_batch_size,
                                     num_workers=self.num_workers,
                                     worker_init_fn=self.init_fn,
                                     shuffle=shuffle, 
@@ -296,7 +283,7 @@ class SetupCallback(Callback):
             ckpt_path = os.path.join(self.ckptdir, "last.ckpt")
             trainer.save_checkpoint(ckpt_path)
 
-    def on_pretrain_routine_start(self, trainer, pl_module):
+    def on_fit_start(self, trainer, pl_module):
         os.makedirs(self.logdir, exist_ok=True)
         os.makedirs(self.ckptdir, exist_ok=True)
         os.makedirs(self.cfgdir, exist_ok=True)
@@ -341,6 +328,7 @@ class ImageLogger(Callback):
                  train_batch_frequency=None,        # train log frequency
                  test_batch_frequency=None,         # test log frequency
                  val_batch_frequency=None,          # validation log frequency
+                 dataset_length={},
                  max_images=-1,                     # max images to perserve in each image folder
                  is_training=True,                  # is training / inferencing model
                  log_on_batch_idx=True,             # log image on batch idx / gs idx
@@ -375,9 +363,9 @@ class ImageLogger(Callback):
             if target == "mask_rescale":
                 return lambda x: visualize(x.long(), **(params | {"is_mask": True}))
             if target == "image_rescale":
-                return lambda x: visualize((x - x.min()) / (x.max() - x.min()), **params)
+                return lambda x: visualize((x.float() - x.min()) / (x.max() - x.min()), **params)
             if target == "image_and_mask":
-                return lambda x: combine_mask_and_im_v2(x, **params)
+                return lambda x: combine_mask_and_im_v2(x.float(), **params)
         
         self.keep_queue_tr = Queue(self.max_images)
         self.keep_queue_val = Queue(self.max_images)
@@ -500,13 +488,14 @@ class CUDACallback(Callback):
     # see https://github.com/SeanNaren/minGPT/blob/master/mingpt/callback.py
     def on_train_epoch_start(self, trainer, pl_module):
         # Reset the memory use counter
-        torch.cuda.reset_peak_memory_stats(trainer.root_gpu)
-        torch.cuda.synchronize(trainer.root_gpu)
+        self.root_gpu = getattr(trainer, "root_gpu", trainer.strategy.root_device.index)
+        torch.cuda.reset_peak_memory_stats(self.root_gpu)
+        torch.cuda.synchronize(self.root_gpu)
         self.start_time = time.time()
 
     def on_train_epoch_end(self, trainer, pl_module):
-        torch.cuda.synchronize(trainer.root_gpu)
-        max_memory = torch.cuda.max_memory_allocated(trainer.root_gpu) / 2 ** 20
+        torch.cuda.synchronize(self.root_gpu)
+        max_memory = torch.cuda.max_memory_allocated(self.root_gpu) / 2 ** 20
         epoch_time = time.time() - self.start_time
 
         try:
@@ -594,7 +583,7 @@ if __name__ == "__main__":
         # model
         config.model['target'] = config.model.get('train_target' if opt.train else 'test_target', 'target')
         config.model['params'] = OmegaConf.merge(config.model['params'], config.model.get('train_only_params' if opt.train else 'test_only_params', {}))
-        model = instantiate_from_config(config.model)
+        model = instantiate_from_config(config.model).set_precision("fp16")
 
         # trainer and callbacks
         trainer_kwargs = dict()
@@ -653,6 +642,39 @@ if __name__ == "__main__":
         if version.parse(pl.__version__) < version.parse('1.4.0'):
             trainer_kwargs["checkpoint_callback"] = instantiate_from_config(modelckpt_cfg)
 
+        # data
+        data: DataModuleFromConfig = instantiate_from_config(config.data)
+        # NOTE according to https://pytorch-lightning.readthedocs.io/en/latest/datamodules.html
+        # calling these ourselves should not be necessary but it is.
+        # lightning still takes care of proper multiprocessing though
+        data.prepare_data()
+        data.setup()
+        print("#### Data #####")
+        # for k in data.datasets:
+        #     print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")
+
+        # configure learning rate
+        bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
+        if not cpu:
+            ngpu = len(lightning_config.trainer.gpus.strip(",").split(','))
+        else:
+            ngpu = 1
+        if 'accumulate_grad_batches' in lightning_config.trainer:
+            accumulate_grad_batches = lightning_config.trainer.accumulate_grad_batches
+        else:
+            accumulate_grad_batches = 1
+        print(f"accumulate_grad_batches = {accumulate_grad_batches}")
+        lightning_config.trainer.accumulate_grad_batches = accumulate_grad_batches
+        if opt.scale_lr:
+            model.learning_rate = accumulate_grad_batches * ngpu * bs * base_lr
+            print(
+                "Setting learning rate to {:.2e} = {} (accumulate_grad_batches) * {} (num_gpus) * {} (batchsize) * {:.2e} (base_lr)".format(
+                    model.learning_rate, accumulate_grad_batches, ngpu, bs, base_lr))
+        else:
+            model.learning_rate = base_lr
+            print("++++ NOT USING LR SCALING ++++")
+            print(f"Setting learning rate to {model.learning_rate:.2e}")
+            
         # add callback which sets up log directory
         default_callbacks_cfg = {
             "setup_callback": {
@@ -684,7 +706,12 @@ if __name__ == "__main__":
                     "val_batch_frequency": 1,
                     "test_batch_frequency": 1,
                     "max_images": 10,
-                    "is_training": opt.train
+                    "is_training": opt.train,
+                    "dataset_length": {
+                        "train": len(data.datasets["train"]),
+                        "val": len(data.datasets["validation"]),
+                        "test": len(data.datasets["test"]),
+                    }
                 }
             }
         }
@@ -724,39 +751,6 @@ if __name__ == "__main__":
 
         trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
         trainer.logdir = logdir  ###
-
-        # data
-        data = instantiate_from_config(config.data)
-        # NOTE according to https://pytorch-lightning.readthedocs.io/en/latest/datamodules.html
-        # calling these ourselves should not be necessary but it is.
-        # lightning still takes care of proper multiprocessing though
-        data.prepare_data()
-        data.setup()
-        print("#### Data #####")
-        # for k in data.datasets:
-        #     print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")
-
-        # configure learning rate
-        bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
-        if not cpu:
-            ngpu = len(lightning_config.trainer.gpus.strip(",").split(','))
-        else:
-            ngpu = 1
-        if 'accumulate_grad_batches' in lightning_config.trainer:
-            accumulate_grad_batches = lightning_config.trainer.accumulate_grad_batches
-        else:
-            accumulate_grad_batches = 1
-        print(f"accumulate_grad_batches = {accumulate_grad_batches}")
-        lightning_config.trainer.accumulate_grad_batches = accumulate_grad_batches
-        if opt.scale_lr:
-            model.learning_rate = accumulate_grad_batches * ngpu * bs * base_lr
-            print(
-                "Setting learning rate to {:.2e} = {} (accumulate_grad_batches) * {} (num_gpus) * {} (batchsize) * {:.2e} (base_lr)".format(
-                    model.learning_rate, accumulate_grad_batches, ngpu, bs, base_lr))
-        else:
-            model.learning_rate = base_lr
-            print("++++ NOT USING LR SCALING ++++")
-            print(f"Setting learning rate to {model.learning_rate:.2e}")
                 
         signal.signal(signal.SIGUSR1, melk)
         signal.signal(signal.SIGUSR2, divein)

@@ -140,14 +140,14 @@ class CheckpointFunction(torch.autograd.Function):
         input_tensors_indices = [ix for ix, x in enumerate(ctx.input_tensors) if not torch.is_tensor(x)]
         input_grads = torch.autograd.grad(
             output_tensors,
-            input_tensors_without_none + ctx.input_params,
+            input_tensors_without_none + [x for x in ctx.input_params if x.requires_grad],
             output_grads,
             allow_unused=True,
         )
         output_grads = [None] * (len(ctx.input_tensors) + len(ctx.input_params))
         ii = 0
         for ix in range(len(ctx.input_tensors) + len(ctx.input_params)):
-            if ix not in input_tensors_indices:
+            if ix not in input_tensors_indices and (ctx.input_tensors + ctx.input_params)[ix].requires_grad:
                 output_grads[ix] = input_grads[ii]
                 ii += 1
             else: output_grads[ix] = None
@@ -225,7 +225,7 @@ class SiLU(nn.Module):
 
 class GroupNorm32(nn.GroupNorm):
     def forward(self, x):
-        return super().forward(x.float()).type(x.dtype)
+        return super().forward(x).type(x.dtype)
 
 def conv_nd(dims, *args, **kwargs):
     """

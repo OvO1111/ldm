@@ -18,8 +18,14 @@ export ngpus=$1
 # export exp="guidegen_ldm_128_128_128_wo_cam"
 # export exp="medsyn_ddpm_128_128_128"
 # export exp="ruijin_2d_vq_ldm_(128)_512_512"
-# export exp="ensemblev2_classifier_128_128_128"
-export exp="brats21_ldm_128_128_128_vqdown2"
+# export static_exp="ensemblev2_classifier_128_128_128"
+static_exp="fmcib_event_classifier_64_64_64"
+export exp=$(yq eval '.model.experiment_name' $2)
+if [ -z "$exp" ] || [ "$exp" == "null" ]; then
+    export exp=$static_exp
+    echo "Failed to extract shell command from JSON file, retreating to $static_exp."
+fi
+
 # export exp="brats21_cdm_128_128_128_fine_ft"
 # export exp="ensemble_multiwinnorm_ldm_vq_128_128_128"
 # export exp='ensemble_ddpm_128_128_128'

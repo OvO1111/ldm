@@ -25,7 +25,15 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/latent-diffusion/brats2021_3d_ldm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
+            "args": ["-b", "./configs/latent-diffusion/brats2021_cfldm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug", "--precision", "fp16"],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "debug tcia",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./main.py",
+            "args": ["-b", "./configs/latent-diffusion/brats2021_cfldm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {
@@ -57,7 +65,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/classifier/ensemble_classifier.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
+            "args": ["-b", "./configs/classifier/fmcib_event_classifier.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug"],
             "console": "integratedTerminal"
         },
         {

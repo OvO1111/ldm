@@ -16,11 +16,10 @@ import torchmetrics.classification
 from ldm.modules.encoders.modules import TransformerEmbedder
 from ldm.modules.diffusionmodules.model import Encoder
 from collections import OrderedDict
-from ldm.modules.diffusionmodules.openaimodel import EncoderUNetModel
 from ldm.util import log_txt_as_img, default, ismap, instantiate_from_config
 
 __models__ = {
-    'image_enc': EncoderUNetModel,
+    'image_enc': Encoder,
     'text_enc': TransformerEmbedder
 }
 

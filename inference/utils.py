@@ -173,7 +173,8 @@ def combine_mask_and_im_v2(x,
 def visualize(image: torch.Tensor, n_mask: int=20, num_images=8, is_mask=False):
     is_mask = is_mask or image.dtype == torch.long
     if len(image.shape) == 5:
-        image = image[:, 0] 
+        # image = image[:, 0]
+        image = rearrange(image, "b c h w d -> (b c) h w d")
     if len(image.shape) == 4:
         b, h = image.shape[:2]
         if h > num_images: image = image[:, ::h // num_images]

@@ -202,84 +202,13 @@ class FrozenClipImageEmbedder(nn.Module):
     def forward(self, x):
         # x is assumed to be in range [-1,1]
         return self.model.encode_image(self.preprocess(x))
-
-
-class OneHotCategoricalBCHW(torch.distributions.OneHotCategorical):
-    """Like OneHotCategorical, but the probabilities are along dim=1."""
-
-    def __init__(
-            self,
-            probs=None,
-            logits=None,
-            validate_args=None):
-
-        if probs is not None and probs.ndim < 2:
-            raise ValueError("`probs.ndim` should be at least 2")
-
-        if logits is not None and logits.ndim < 2:
-            raise ValueError("`logits.ndim` should be at least 2")
-
-        probs = self.channels_last(probs) if probs is not None else None
-        logits = self.channels_last(logits) if logits is not None else None
-
-        super().__init__(probs, logits, validate_args)
-
-    def sample(self, sample_shape=torch.Size()):
-        res = super().sample(sample_shape)
-        return self.channels_second(res)
-
-    @staticmethod
-    def channels_last(arr: torch.Tensor) -> torch.Tensor:
-        """Move the channel dimension from dim=1 to dim=-1"""
-        dim_order = (0,) + tuple(range(2, arr.ndim)) + (1,)
-        return arr.permute(dim_order)
-
-    @staticmethod
-    def channels_second(arr: torch.Tensor) -> torch.Tensor:
-        """Move the channel dimension from dim=-1 to dim=1"""
-        dim_order = (0, arr.ndim - 1) + tuple(range(1, arr.ndim - 1))
-        return arr.permute(dim_order)
-
-    def max_prob_sample(self):
-        """Sample with maximum probability"""
-        num_classes = self.probs.shape[-1]
-        res = torch.nn.functional.one_hot(self.probs.argmax(dim=-1), num_classes)
-        return self.channels_second(res)
-
-    def prob_sample(self):
-        """Sample with probabilities"""
-        return self.channels_second(self.probs)
-
-    
-class CategoricalDiffusionWrapper(nn.Module):
-    def __init__(self, num_classes, sample_scheme="majority"):
-        super().__init__()
-        self.dummy = nn.Identity()
-        self.is_conditional = False
-        self.num_classes = num_classes
-        self.sample_scheme = sample_scheme
-        
-    def encode(self, x, c=None):
-        x_onehot = nn.functional.one_hot((x * (self.num_classes - 1)).long(), self.num_classes)
-        x_onehot = rearrange(x_onehot, "b 1 h w d x -> b x h w d")
-        return x_onehot
-    
-    def decode(self, p, c=None, sample_scheme=None):
-        sample_scheme = sample_scheme if sample_scheme is not None else self.sample_scheme
-        distrib = OneHotCategoricalBCHW(logits=p)
-        if sample_scheme == "majority":
-            x = distrib.max_prob_sample()
-        elif sample_scheme == "confidence":
-            x = distrib.prob_sample()
-        else:
-            x = distrib.sample()
-        return x.argmax(1, keepdim=True)
     
     
 class IdentityFirstStage(nn.Module):
-    def __init__(self):
+    def __init__(self, **kwargs):
         super().__init__()
         self.dummy = nn.Identity()
+        self.__dict__.update(kwargs)
         
     def encode(self, x, c=None):
         return self.dummy(x)
@@ -370,7 +299,7 @@ class FrozenBERTEmbedder(AbstractEncoder):
         return self(text)
 
 
-class IdentityEncoder(nn.Module):
+class ResizeConditionEncoder(nn.Module):
     def __init__(self, input_size=None, output_size=None, output_dtype='float'):
         super().__init__()
         self.input_size = omegaconf.OmegaConf.to_container(input_size)
@@ -395,6 +324,23 @@ class IdentityEncoder(nn.Module):
         if self.dtype == torch.float32:
             return nn.functional.interpolate(tensor.float(), self.input_size, mode='trilinear' if tensor.ndim == 5 else 'bilinear').to(dtype)
         return nn.functional.interpolate(tensor.long(), self.input_size, mode='nearest').to(dtype)
+    
+    
+class LinearEmbedder(nn.Module):
+    def __init__(self, in_channels, model_channels, ch_mult=[1,2,4,8]):
+        super().__init__()
+        linear = nn.ModuleList()
+        linear.append(nn.Linear(in_channels, model_channels))
+        for i in range(len(ch_mult) - 1):
+            linear.append(nn.Linear(model_channels * ch_mult[i], model_channels * ch_mult[i+1]))
+            linear.append(nn.SiLU())
+        self.linear = nn.Sequential(*linear)
+        
+    def forward(self, *a, **kw):
+        return self.encode(*a, **kw)
+    
+    def encode(self, tensor: torch.Tensor):
+        return self.linear(tensor)
     
     
 class HybridConditionEncoder(nn.Module):

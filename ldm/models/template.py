@@ -13,13 +13,16 @@ from natsort import natsorted
 
 from ldm.modules.encoders.modules import TransformerEmbedder
 from ldm.modules.diffusionmodules.model import Encoder
-from ldm.modules.diffusionmodules.openaimodel import EncoderUNetModel, UNetModel
+from ldm.modules.diffusionmodules.openaimodel import UNetModel
 from ldm.util import log_txt_as_img, default, ismap, instantiate_from_config
 
 
 class BasePytorchLightningTrainer(pl.LightningModule):
-    def __init__(self,):
+    def __init__(self, ckpt_path=None):
         super().__init__()
+        self.ckpt_path = ckpt_path
+        if self.ckpt_path is not None:
+            self.init_from_ckpt(self.ckpt_path)
         
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
         sd = torch.load(path, map_location="cpu")

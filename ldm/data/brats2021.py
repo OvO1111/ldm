@@ -33,7 +33,8 @@ class BraTS2021_3D(Dataset):
         self.transforms = dict(
             crop=TorchioForegroundCropper(crop_level="patch", 
                                           crop_anchor="image",
-                                          crop_kwargs=dict(output_size=crop_to, foreground_prob=1.),) if crop_to is not None else identity,
+                                          output_size=crop_to, 
+                                          foreground_prob=1.,) if crop_to is not None else identity,
             resize=tio.Resize(resize_to) if resize_to is not None else identity,
             normalize_image=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=None, include=["image"]),
             normalize_mask=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(0, 3), include=["fine"])
@@ -78,7 +79,7 @@ class BraTS2021_3D(Dataset):
         subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
         subject = {k: v.data for k, v in subject.items()} | {"ids": idx, 
                                                              "ori_size": ori_size,
-                                                             "mask": subject.fine.data if idx in self.fine_labeled_indices else -subject.coarse.data, 
+                                                             "mask": subject.fine.data if idx in self.fine_labeled_indices else subject.coarse.data, 
                                                              'casename': os.path.basename(self.split_keys[idx]).split('.')[0]}
         subject = subject | {'cond': torch.cat([subject['mask'], subject['coarse']])}
 
@@ -219,6 +220,69 @@ class BraTS2021_3DFG(Dataset):
                 iterator.set_postfix(shape=item["image"].shape)
             except Exception as e:
                 print(self.split_keys[idx], e)
+                
+    def collate(self, batch):
+        return _utils.collate.default_collate(batch)
+    
+    
+class BraTS2021_CL(Dataset):
+    def __init__(self, split="train", 
+                crop_to=(96, 96, 96),
+                resize_to=None,
+                max_size=None,
+                n_fine=None,
+                no_mask_normalize=False,
+                base="/ailab/user/dailinrui/data/datasets/BraTS2021"):
+        super().__init__()
+        self.load_fn = lambda x: h5py.File(x)
+        self.no_mask_normalize = no_mask_normalize
+        self.transforms = dict(
+            crop=TorchioForegroundCropper(crop_level="patch", 
+                                          crop_anchor="fine",
+                                          output_size=crop_to, 
+                                          foreground_prob=1.,) if crop_to is not None else identity,
+            normalize_image=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=None, include=["image"]),
+            normalize_mask=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(0, 3), include=["fine"])
+        )
+
+        self.n_fine = n_fine
+        self.split = split
+        self.max_size = max_size
+        
+        for spt in ["train", "val", "test"]:
+            with open(f"{base}/{spt}.list") as fp:
+                self.__dict__[f"{spt}_keys"] = [os.path.join(f"{base}/data", _.strip()) for _ in fp.readlines()]
+        else:
+            self.split_keys = getattr(self, f"{split}_keys")[:max_size]
+            
+        # for broken_file in [os.path.join(f"{base}/data", _) for _ in ["BraTS2021_00000.h5"]]: self.split_keys.remove(broken_file) if broken_file in self.split_keys else 0
+        use_fine_labeling = n_fine is not None and self.split == "train"
+        self.fine_labeled_indices = list(range(n_fine if use_fine_labeling else len(self.split_keys)))
+        self.coarse_labeled_indices = [i for i in range(len(self.split_keys)) if i not in self.fine_labeled_indices] if use_fine_labeling else list(range(len(self.split_keys)))
+
+    def __len__(self):
+        return len(self.split_keys)
+
+    def __getitem__(self, idx):
+        item = self.load_fn(self.split_keys[idx])
+        image, mask = map(lambda x: item[x][:], ["image", "label"])
+        
+        subject = tio.Subject(image=tio.ScalarImage(tensor=image), 
+                              coarse=tio.ScalarImage(tensor=(mask >= 1).astype(np.float32)[None]), 
+                              fine=tio.ScalarImage(tensor=mask[None]),)
+        # normalize
+        subject = self.transforms["normalize_image"](subject)
+        if not self.no_mask_normalize: subject = self.transforms["normalize_mask"](subject)
+        # crop
+        subject = self.transforms["crop"](subject)
+        # random aug
+        subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
+        subject = {k: v.data for k, v in subject.items()} | {"ids": idx, 
+                                                             "mask": subject.fine.data if idx in self.fine_labeled_indices else subject.coarse.data * (-1), 
+                                                             'casename': os.path.basename(self.split_keys[idx]).split('.')[0]}
+        subject = subject | {'cond': torch.cat([subject['mask'], subject['coarse']])}
+
+        return subject
                 
     def collate(self, batch):
         return _utils.collate.default_collate(batch)

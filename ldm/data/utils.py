@@ -78,7 +78,7 @@ class LabelParser:
         # sitk.WriteImage(sitk.GetImageFromArray(label[0].numpy().astype(np.uint8)), "/ailab/user/dailinrui/data/test_before_process.nii.gz")
         # sitk.WriteImage(sitk.GetImageFromArray(label_[0].numpy().astype(np.uint8)), "/ailab/user/dailinrui/data/test_after_process.nii.gz")
         return label_
-
+  
 
 def identity(x, *a, **b): return x
 
@@ -120,37 +120,6 @@ def parse(i, target_res, raw=False):
     resized = ndimage.zoom(img, resize_coeff, order=3)
     return resized, resize_coeff
 
-
-def _mp_prepare(process_dict, save_dir, target_res, pid, raw=False):
-    cumpred = 0
-    dummy_dir = maybe_mkdir(f"/mnt/data/smart_health_02/dailinrui/data/temp/{pid}", destory_on_exist=True)
-    for k, patient_imaging_history in process_dict.items():
-        cumpred += 1
-        _latent = defaultdict(list)
-        # if path.exists(save_dir / f"case_{k}.npz"): continue
-        valid_imaging_histories = [_ for _ in sorted(patient_imaging_history, key=lambda x: get_date(x["time"]))
-                                   if len(_["abd_imagings"]) > 0]
-        for img_index, img in enumerate(valid_imaging_histories):
-            if len(img["abd_imagings"]) == 0: continue
-            _latent["date"].append(get_date(img["time"]))
-            parsed, coeff = parse(img["abd_imagings"][0], target_res, raw)
-            _latent["resize_coeff"].append(coeff)
-            _latent["img"].append(parsed)
-        if len(_latent["date"]) == 0: continue
-        
-        dates = np.stack(_latent["date"], axis=0)
-        if not raw:
-            imgs = np.stack(_latent["img"], axis=0)
-            coeffs = np.stack(_latent["resize_coeff"], axis=0)
-            np.savez(dummy_dir / f"case_{k}.npz", date=dates, img=imgs, resize_coeff=coeffs)
-            print(f"<{pid}> is processing {k}: {cumpred}/{len(process_dict)} cases {coeffs[0].tolist()}", end="\r")
-        else:
-            np.savez(dummy_dir / f"case_{k}.npz", *_latent["img"], date=dates)
-            print(f"<{pid}> is processing {k}: {cumpred}/{len(process_dict)} cases {_latent['img'][0].shape}", end="\r") 
-        shutil.copyfile(dummy_dir / f"case_{k}.npz", save_dir / f"case_{k}.npz")
-        os.remove(dummy_dir / f"case_{k}.npz")
-    shutil.rmtree(dummy_dir)
-    
     
 def check_validity(file_ls):
     broken_ls = []
@@ -171,6 +140,50 @@ def window_norm(image, window_pos=60, window_width=360, out=(-1, 1)):
     image = image.clamp(min=out[0], max=out[1])
     return image
 
+
+class invertible_window_norm:
+    def __init__(self, 
+                 window_pos=60, 
+                 window_width=360, 
+                 in_minmax=(-1200, 1200), 
+                 out_minmax=(-1, 1), 
+                 outlier_percentile=0.1):
+        self.window_pos = window_pos
+        self.window_width = window_width
+        self.window_max = window_pos + window_width / 2
+        self.window_min = window_pos - window_width / 2
+        self.outlier_percentile = outlier_percentile
+        self.in_min, self.in_max = in_minmax
+        self.out_min, self.out_max = out_minmax
+
+    def encode(self, image):
+        out_range = self.out_max - self.out_min
+        outlier_offset = self.outlier_percentile / 2 * out_range
+
+        normalized = np.zeros_like(image) if isinstance(image, np.ndarray) else torch.zeros_like(image)
+        mask_lower = image < self.window_min
+        mask_upper = image > self.window_max
+        mask_window = (image >= self.window_min) & (image <= self.window_max)
+        normalized[mask_lower] = (image[mask_lower] - self.window_min) / (self.window_min - self.in_min) * outlier_offset + (self.out_min + outlier_offset)
+        normalized[mask_upper] = (image[mask_upper] - self.in_max) / (self.in_max - self.window_max) * outlier_offset + self.out_max
+        normalized[mask_window] = (image[mask_window] - self.window_max) / self.window_width * (1 - self.outlier_percentile) * out_range + (self.out_max - outlier_offset)
+        
+        return normalized
+    
+    def decode(self, image):
+        out_range = self.out_max - self.out_min
+        outlier_offset = self.outlier_percentile / 2 * out_range
+        
+        recon = np.zeros_like(image) if isinstance(image, np.ndarray) else torch.zeros_like(image)
+        mask_lower = image < self.out_min + outlier_offset
+        mask_upper = image > self.out_max - outlier_offset
+        mask_window = (image >= self.out_min + outlier_offset) & (image <= self.out_max - outlier_offset)
+        recon[mask_lower] = -(image[mask_lower] - (self.out_min + outlier_offset)) / outlier_offset * (self.in_min - self.window_min) + self.window_min
+        recon[mask_upper] = (image[mask_upper] - self.out_max) / outlier_offset * (self.in_max - self.window_max) + self.in_max
+        recon[mask_window] = (image[mask_window] - (self.out_max - outlier_offset)) / ((1 - self.outlier_percentile) * out_range) * self.window_width + self.window_max
+        
+        return recon
+        
 
 def load_or_write_split(basefolder, force=False, **splits):
     splits_file = os.path.join(basefolder, "splits.json")
@@ -221,20 +234,65 @@ class TorchioBaseResizer(tio.transforms.Transform):
 
 
 class TorchioForegroundCropper(tio.transforms.Transform):
-    def __init__(self, crop_level="all", crop_kwargs=None, crop_anchor=None,
+    def __init__(self, 
+                 crop_level="all", 
+                 crop_anchor=None,
+                 parent_kwargs={},
                  *args, **kwargs):
         self.crop_level = crop_level
-        self.crop_kwargs = crop_kwargs
+        self.crop_kwargs = kwargs
         self.crop_anchor = crop_anchor
-        super().__init__(*args, **kwargs)
+        super().__init__(**parent_kwargs)
+        
+    def _patch_cropper(self, _image, _output_size, _mode="random"):
+        # maybe pad image if _output_size is larger than _image.shape
+        ph = max((_output_size[0] - _image.shape[1]) // 2 + 3, 0)
+        pw = max((_output_size[1] - _image.shape[2]) // 2 + 3, 0)
+        pd = max((_output_size[2] - _image.shape[3]) // 2 + 3, 0)
+        # _image = torch.nn.functional.pad(_image, (pd, pd, pw, pw, ph, ph), mode='constant', value=0)
+        # padder = lambda x: torch.nn.functional.pad(x, (pd, pd, ph, ph, pw, pw), mode='constant', value=0)
+        padder = identity
+            
+        if _mode == "random":
+            h_center = random.randint(ph, _image.shape[0] - ph)
+            w_center = random.randint(pw, _image.shape[1] - pw)
+            d_center = random.randint(pd, _image.shape[2] - pd)
 
+        elif _mode == "foreground":
+            hl, hr = torch.where(torch.any(torch.any(_image, 2), 2))[-1][[0, -1]]
+            wl, wr = torch.where(torch.any(torch.any(_image, 1), -1))[-1][[0, -1]]
+            dl, dr = torch.where(torch.any(torch.any(_image, 1), 1))[-1][[0, -1]]
+            hc, hd = (hl + hr) // 2, hr - hl + 1
+            wc, wd = (wl + wr) // 2, wr - wl + 1
+            dc, dd = (dl + dr) // 2, dr - dl + 1
+            
+            h_center = random.randint(hc - hd // 4, max(hc + hd // 4, hc - hd // 4 + 1))
+            w_center = random.randint(wc - wd // 4, max(wc + wd // 4, wc - wd // 4 + 1))
+            d_center = random.randint(dc - dd // 4, max(dc + dd // 4, dc - dd // 4 + 1))
+        
+        h_left = max(0, h_center - _output_size[0] // 2)
+        h_right = min(_image.shape[1], h_center + _output_size[0] // 2)
+        h_offset = (max(0, _output_size[0] // 2 - h_center), max(0, h_center + _output_size[0] // 2 - _image.shape[1]))
+        w_left = max(0, w_center - _output_size[1] // 2)
+        w_right = min(_image.shape[2], w_center + _output_size[1] // 2)
+        w_offset = (max(0, _output_size[1] // 2 - w_center), max(0, w_center + _output_size[1] // 2 - _image.shape[2]))
+        d_left = max(0, d_center - _output_size[2] // 2)
+        d_right = min(_image.shape[3], d_center + _output_size[2] // 2) 
+        d_offset = (max(0, _output_size[2] // 2 - d_center), max(0, d_center + _output_size[2] // 2 - _image.shape[3]))
+        cropper = lambda x: x[:, h_left: h_right, w_left: w_right, d_left: d_right]
+        post_padder = lambda x: torch.nn.functional.pad(x, 
+                                                        (*d_offset, *w_offset, *h_offset),
+                                                        mode='constant', value=0)
+            
+        return padder, cropper, post_padder 
+            
     def apply_transform(self, data: tio.Subject):
         # data: c h w d
         subject_ = {k: v.data for k, v in data.items()}
         type_ = {k: v.type for k, v in data.items()}
         class_ = {k: tio.ScalarImage if isinstance(v, tio.ScalarImage) else tio.LabelMap for k, v in data.items()}
 
-        if self.crop_level == "all":
+        if self.crop_level == "raw":
             return data
 
         if self.crop_level == "patch":
@@ -242,53 +300,33 @@ class TorchioForegroundCropper(tio.transforms.Transform):
             output_size = self.crop_kwargs["output_size"]
             foreground_prob = self.crop_kwargs.get("foreground_prob", 0)
             
-            pw = max((output_size[0] - image_.shape[1]) // 2 + 3, 0)
-            ph = max((output_size[1] - image_.shape[2]) // 2 + 3, 0)
-            pd = max((output_size[2] - image_.shape[3]) // 2 + 3, 0)
-            image_ = torch.nn.functional.pad(image_, (pd, pd, ph, ph, pw, pw), mode='constant', value=0)
-
-            (c, w, h, d) = image_.shape
-            if random.random() < foreground_prob:
-                wl, wr = torch.where(torch.any(torch.any(image_, 2), 2))[0][[0, -1]]
-                hl, hr = torch.where(torch.any(torch.any(image_, 1), -1))[0][[0, -1]]
-                dl, dr = torch.where(torch.any(torch.any(image_, 1), 1))[0][[0, -1]]
-                if wl > w - output_size[0]: w1 = random.randint(0, w-output_size[0])
-                else: w1 = random.randint(wl, min(w - output_size[0], wr))
-                if hl > h - output_size[1]: h1 = random.randint(0, h-output_size[1])
-                else: h1 = random.randint(hl, min(h - output_size[1], hr))
-                if dl > d - output_size[2]: d1 = random.randint(0, d-output_size[2])
-                else: d1 = random.randint(dl, min(d - output_size[2], dr))
-            else:
-                w1 = np.random.randint(0, w - output_size[0])
-                h1 = np.random.randint(0, h - output_size[1])
-                d1 = np.random.randint(0, d - output_size[2])
-            
-            padder = identity if pw + ph + pd == 0 else lambda x: torch.nn.functional.pad(x, (pd, pd, ph, ph, pw, pw), mode='constant', value=0)
-            cropper = [slice(w1, w1 + output_size[0]), slice(h1, h1 + output_size[1]), slice(d1, d1 + output_size[2])]
-            subject_ = {k: class_[k](tensor=padder(v)[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
-            
-        outline = self.crop_kwargs.get("outline", [0] * 6)
-        if isinstance(outline, int): outline = [outline] * 6
-        if len(outline) == 3: outline = reduce(lambda x, y: x + y, zip(outline, outline))
-        if self.crop_level == "image_foreground":
-            image_ = subject_[self.crop_anchor]
-            s1, e1 = torch.where((image_ >= self.crop_kwargs.get('foreground_hu_lb', 0)).any(-1).any(-1).any(0))[0][[0, -1]]
-            s2, e2 = torch.where((image_ >= self.crop_kwargs.get('foreground_hu_lb', 0)).any(1).any(-1).any(0))[0][[0, -1]]
-            s3, e3 = torch.where((image_ >= self.crop_kwargs.get('foreground_hu_lb', 0)).any(1).any(1).any(0))[0][[0, -1]]
-            cropper = [slice(max(0, s1 - outline[0]), min(e1 + 1 + outline[1], image_.shape[1])),
-                       slice(max(0, s2 - outline[2]), min(e2 + 1 + outline[3], image_.shape[2])),
-                       slice(max(0, s3 - outline[4]), min(e3 + 1 + outline[5], image_.shape[3]))]
-            subject_ = {k: class_[k](tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
+            mode = "foreground" if random.random() < foreground_prob else "random"
+            padder, cropper, post_padder = self._patch_cropper(image_, output_size, mode)
+            subject_ = {k: class_[k](tensor=post_padder(cropper(padder(v))), type=type_[k]) for k, v in subject_.items()}
         
-        if self.crop_level == "mask_foreground":
-            mask_ = conserve_only_certain_labels(subject_[self.crop_anchor], self.crop_kwargs.get("foreground_mask_label", None))
-            s1, e1 = torch.where(mask_.any(-1).any(-1).any(0))[0][[0, -1]]
-            s2, e2 = torch.where(mask_.any(1).any(-1).any(0))[0][[0, -1]]
-            s3, e3 = torch.where(mask_.any(1).any(1).any(0))[0][[0, -1]]
-            cropper = [slice(max(0, s1 - outline[0]), min(e1 + 1 + outline[1], mask_.shape[1])),
-                       slice(max(0, s2 - outline[2]), min(e2 + 1 + outline[3], mask_.shape[2])),
-                       slice(max(0, s3 - outline[4]), min(e3 + 1 + outline[5], mask_.shape[3]))]
-            subject_ = {k: class_[k](tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
+        elif "foreground" in self.crop_level:
+            outline = self.crop_kwargs.get("outline", [0] * 6)
+            if isinstance(outline, int): outline = [outline] * 6
+            if len(outline) == 3: outline = reduce(lambda x, y: x + y, zip(outline, outline))
+            if self.crop_level == "image_foreground":
+                image_ = subject_[self.crop_anchor]
+                s1, e1 = torch.where((image_ >= self.crop_kwargs.get('foreground_hu_lb', 0)).any(-1).any(-1).any(0))[0][[0, -1]]
+                s2, e2 = torch.where((image_ >= self.crop_kwargs.get('foreground_hu_lb', 0)).any(1).any(-1).any(0))[0][[0, -1]]
+                s3, e3 = torch.where((image_ >= self.crop_kwargs.get('foreground_hu_lb', 0)).any(1).any(1).any(0))[0][[0, -1]]
+                cropper = [slice(max(0, s1 - outline[0]), min(e1 + 1 + outline[1], image_.shape[1])),
+                        slice(max(0, s2 - outline[2]), min(e2 + 1 + outline[3], image_.shape[2])),
+                        slice(max(0, s3 - outline[4]), min(e3 + 1 + outline[5], image_.shape[3]))]
+                subject_ = {k: class_[k](tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
+            
+            if self.crop_level == "mask_foreground":
+                mask_ = conserve_only_certain_labels(subject_[self.crop_anchor], self.crop_kwargs.get("foreground_mask_label", None))
+                s1, e1 = torch.where(mask_.any(-1).any(-1).any(0))[0][[0, -1]]
+                s2, e2 = torch.where(mask_.any(1).any(-1).any(0))[0][[0, -1]]
+                s3, e3 = torch.where(mask_.any(1).any(1).any(0))[0][[0, -1]]
+                cropper = [slice(max(0, s1 - outline[0]), min(e1 + 1 + outline[1], mask_.shape[1])),
+                        slice(max(0, s2 - outline[2]), min(e2 + 1 + outline[3], mask_.shape[2])),
+                        slice(max(0, s3 - outline[4]), min(e3 + 1 + outline[5], mask_.shape[3]))]
+                subject_ = {k: class_[k](tensor=v[:, cropper[0], cropper[1], cropper[2]], type=type_[k]) for k, v in subject_.items()}
             
         return tio.Subject(subject_)
 

@@ -16,7 +16,7 @@ from collections import defaultdict
 from einops import rearrange, repeat
 from ldm.data.utils import load_or_write_split
 from ldm.util import instantiate_from_config
-from pytorch_lightning.utilities.distributed import rank_zero_only
+from pytorch_lightning.utilities import rank_zero_only
 from ldm.models.autoencoder import AutoencoderKL, VQModelInterface
 from ldm.models.diffusion.ddpm import LatentDiffusion
 from ldm.models.diffusion.cdpm import CategoricalDiffusion, OneHotCategoricalBCHW
