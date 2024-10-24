@@ -36,12 +36,16 @@ class FMCIBMeasurement(BasePytorchLightningTrainer):
                  use_as_measurement=False, 
                  num_timesteps=1000,
                  use_timesteps=False,
-                 risk_strat=12):
-        super().__init__()
+                 risk_strat=12, 
+                 **kwargs):
+        super().__init__(**kwargs)
         self.model = fmcib_model(eval_mode=True)
         self.use_regressor = use_regressor
         if self.use_regressor:
             self.regressor = Classifier(num_timesteps, risk_strat, use_timesteps=use_timesteps)
+        
+        if self.ckpt_path is not None:
+            self.init_from_ckpt(self.ckpt_path)
             
         if use_as_measurement:
             self.model.eval()

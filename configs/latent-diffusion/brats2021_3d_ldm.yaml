@@ -88,7 +88,7 @@ model:
     #       use_checkpoint: True  # always use ckpt
 
     cond_stage_config: 
-      target: ldm.modules.encoders.modules.IdentityEncoder
+      target: ldm.modules.encoders.modules.ResizeConditionEncoder
       params:
         input_size: [96, 96, 96]
         output_size: [48, 48, 48]

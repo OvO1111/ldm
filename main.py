@@ -583,7 +583,7 @@ if __name__ == "__main__":
         # model
         config.model['target'] = config.model.get('train_target' if opt.train else 'test_target', 'target')
         config.model['params'] = OmegaConf.merge(config.model['params'], config.model.get('train_only_params' if opt.train else 'test_only_params', {}))
-        model = instantiate_from_config(config.model).set_precision("fp16")
+        model = instantiate_from_config(config.model).set_precision(opt.precision)
 
         # trainer and callbacks
         trainer_kwargs = dict()

@@ -24,12 +24,12 @@ model:
         weight_decay: 0.999
         betas: [0.1, 0.01]
         lr: 1e-2
-        use_optimizer_on_classifier_scale: false
+        use_optimizer_on_classifier_scale: true
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.RiskUNetModel
       params:
-        image_size: 64  # not used
+        image_size: [64, 64, 64]
         in_channels: 2
         out_channels: 2
         model_channels: 64
@@ -64,7 +64,7 @@ data:
   target: main.DataModuleFromConfig
   params:
     batch_size: 4  # train batch size, test is default to test_batch_size=1
-    num_workers: 8
+    num_workers: 16
     wrap: False
     train:
       target: ldm.data.tcia.TCIA

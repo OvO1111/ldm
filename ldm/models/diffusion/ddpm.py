@@ -40,15 +40,18 @@ def disabled_train(self, mode=True):
 
 
 def set_precision(precision):
-    if precision == "fp16":
+    if precision in [16, "16", "fp16", torch.float16]:
         p = torch.float16
         fn = lambda tensor: tensor.half()
-    elif precision == "bf16":
+    elif precision in ["bf16", torch.bfloat16]:
         p = torch.bfloat16
         fn = lambda tensor: tensor.bfloat16()
-    elif precision == "fp32":
+    elif precision in [32, "32", "fp32", torch.float32]:
         p = torch.float32
         fn = lambda tensor: tensor.float()
+    elif precision in [64, "64", "fp64", "double", torch.double, torch.float64]:
+        p = torch.float64
+        fn = lambda tensor: tensor.double()
     else:
         raise ValueError(f"Unsupported precision: {precision}")
     
@@ -67,7 +70,8 @@ def set_precision(precision):
                 module.bias.data = fn(module.bias.data)
             elif isinstance(module, nn.Linear):
                 module.weight.data = fn(module.weight.data) 
-                module.bias.data = fn(module.bias.data)
+                if module.bias is not None:
+                    module.bias.data = fn(module.bias.data)
     return _impl
 
 
@@ -150,16 +154,16 @@ class DDPM(pl.LightningModule):
         self.logvar = self.logvar.to(self.device)
         
     def set_precision(self, precision):
-        if precision == "fp16":
-            self.half()
-            self.model.half()
-        elif precision == "bf16":
-            self.bfloat16()
-        elif precision == "fp32":
-            self.float()
-        elif precision == "fp64":
-            self.double()
-        self.model.set_precision(precision)
+        # if precision == 16:
+        #     self.half()
+        #     self.model.half()
+        # elif precision == "bf16":
+        #     self.bfloat16()
+        # elif precision == 32:
+        #     self.float()
+        # elif precision == 64:
+        #     self.double()
+        self.model.diffusion_model.apply(set_precision(precision))
         return self
 
     def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
@@ -1477,9 +1481,6 @@ class DiffusionWrapper(pl.LightningModule):
         self.diffusion_model = instantiate_from_config(diff_model_config)
         self.conditioning_key = conditioning_key
         assert self.conditioning_key in [None, 'concat', 'crossattn', 'hybrid', 'adm']
-        
-    def set_precision(self, precision):
-        self.diffusion_model.apply(set_precision(precision))
 
     def forward(self, x, t, c_concat: list = None, c_crossattn: list = None):
         if self.conditioning_key is None:
@@ -1599,34 +1600,10 @@ class CoarseAndFineDiffusion(LatentDiffusion):
     
     
 class RiskDiffusion(LatentDiffusion):
-    def __init__(self, embed_dims=[512], **kw):
+    def __init__(self, **kw):
         super().__init__(**kw)
         
-        fcn = nn.ModuleList()
-        fcn.append(nn.Linear(self.model.diffusion_model.model_channels * self.model.diffusion_model.channel_mult[-1], embed_dims[0]))
-        for i in range(len(embed_dims) - 1):
-            fcn.append(nn.Sequential(nn.ReLU(), nn.Linear(embed_dims[i], embed_dims[i+1])))
-        self.fcn = nn.Sequential(*fcn)
-        self.proj_in = nn.Conv1d(np.cumprod(self.image_size)[-1] // 8**(len(self.model.diffusion_model.channel_mult)-1), 1, 1)
-        
-    def shared_step(self, batch, **kwargs):
-        x, c = self.get_input(batch, self.first_stage_key)
-        timelines = super(LatentDiffusion, self).get_input(batch, self.cond_stage_key)[:, 0]
-        loss = self(x, c, timelines)
-        return loss
-        
-    def forward(self, x, c, timelines, *args, **kwargs):
-        t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
-        if self.model.conditioning_key is not None:
-            assert c is not None
-            if self.cond_stage_trainable:
-                c = self.get_learned_conditioning(c)
-            if self.shorten_cond_schedule:  # TODO: drop this option
-                tc = self.cond_ids[t].to(self.device)
-                c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.to(self.dtype)))
-        return self.p_losses(x, c, t, timelines, *args, **kwargs)
-        
-    def p_losses(self, x_start, cond, t, cond_timelines, noise=None):
+    def p_losses(self, x_start, cond, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         model_output, model_latents = self.apply_model(x_noisy, t, cond)
@@ -1661,15 +1638,14 @@ class RiskDiffusion(LatentDiffusion):
         loss_dict.update({f'{prefix}/loss': loss})
         
         # similarity loss
-        model_latents = self.fcn(rearrange(model_latents, "b c ... -> b (...) c"))
-        model_latents = self.proj_in(model_latents)
         model_latents = model_latents.view(model_latents.shape[0], -1)
-        model_latents = model_latents / torch.linalg.norm(model_latents, dim=0, keepdim=True)
-        cond_timelines = cond_timelines / torch.linalg.norm(cond_timelines, dim=0, keepdim=True)
+        model_latents = model_latents / torch.linalg.norm(model_latents, dim=1, keepdim=True)
+        cond_latents = cond.view(cond.shape[0], -1)
+        cond_latents = cond_latents / torch.linalg.norm(cond_latents, dim=1, keepdim=True)
         
         temperature = 1 - t / self.num_timesteps
-        sim_latents = torch.log_softmax(torch.einsum("bi,ci->bc", model_latents, model_latents) / temperature, dim=1)
-        sim_target = torch.log_softmax(torch.einsum("bi,ci->bc", cond_timelines, cond_timelines), dim=1)
+        sim_latents = torch.log_softmax((model_latents @ model_latents.T) / temperature, dim=1)
+        sim_target = torch.log_softmax((cond_latents @ cond_latents.T) / temperature, dim=1)
         loss_sim = torch.nn.functional.kl_div(sim_latents, sim_target, log_target=True, reduction='none').mean() / 100
         loss_dict.update({f'{prefix}/loss_sim': loss_sim})
         loss += loss_sim
@@ -1678,7 +1654,7 @@ class RiskDiffusion(LatentDiffusion):
     
     def configure_optimizers(self):
         lr = self.learning_rate
-        params = list(self.model.parameters()) + list(self.fcn.parameters()) + list(self.proj_in.parameters())
+        params = list(self.model.parameters())
         if self.cond_stage_trainable:
             print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
             params = params + list(self.cond_stage_model.parameters())

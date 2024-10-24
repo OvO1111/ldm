@@ -7,6 +7,7 @@ import numpy as np
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange, repeat
 
 from ldm.modules.diffusionmodules.util import (
     checkpoint,
@@ -748,7 +749,7 @@ class UNetModel(nn.Module):
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
 
-        h = x.type(self.dtype)
+        h = x.type(x.dtype)
         for module in self.input_blocks:
             h = module(h, emb, context)
             hs.append(h)
@@ -764,11 +765,6 @@ class UNetModel(nn.Module):
 
 
 class ControlNetUNetModel(UNetModel):
-    """
-    The half UNet model with attention and timestep embedding.
-    For usage, see UNet.
-    """
-
     def __init__(
         self, control_chn=[0], **unet_kwargs
     ):
@@ -806,7 +802,7 @@ class ControlNetUNetModel(UNetModel):
         ), "must specify y if and only if the model is class-conditional"
         hs = []
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
-        emb = self.time_embed(t_emb.to(self.dtype))
+        emb = self.time_embed(t_emb.to(inputs.dtype))
         
         x = th.index_select(inputs, 1, th.tensor([i for i in range(inputs.shape[1]) if i not in self.control_chn]).to(inputs.device))
         ctrl = th.index_select(inputs, 1, th.tensor(self.control_chn).to(inputs.device))
@@ -816,8 +812,8 @@ class ControlNetUNetModel(UNetModel):
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
 
-        h = x.type(self.dtype)
-        zh = zx.type(self.dtype)
+        h = x.type(inputs.dtype)
+        zh = zx.type(inputs.dtype)
         for module, ctrls, zero_conv in zip(self.input_blocks, self.control_net, self.control_input_zero_convs):
             h = module(h, emb, context)
             zh = ctrls(zh, emb, context)
@@ -831,11 +827,84 @@ class ControlNetUNetModel(UNetModel):
             return self.id_predictor(h)
         else:
             return self.out(h)
+        
+        
+class ControlNetUNetModelLegacy(nn.Module):
+    def __init__(
+        self, control_chn=[0], **unet_kwargs
+    ):
+        super().__init__()
+        self.control_chn = control_chn
+        unet_kwargs["in_channels"] = unet_kwargs["in_channels"] - 1
+        self.unet = UNetModel(**unet_kwargs)
+        
+        self.input_map = TimestepEmbedSequential(
+            conv_nd(self.unet.dims, 1, 16, 3, padding=1),
+            nn.SiLU(),
+            conv_nd(self.unet.dims, 16, 32, 3, padding=1),
+            nn.SiLU(),
+            zero_module(conv_nd(self.dims, 32, self.in_channels, 3, padding=1))
+        )
+        self.control_net = copy.deepcopy(self.unet.input_blocks)
+        
+        ch = self.unet.input_block_chans
+        self.input_zero_convs = nn.ModuleList()
+        self.middle_zero_conv = zero_module(conv_nd(self.unet.dims, ch[-1], ch[-1], 3, padding=1))
+        for i in range(len(self.control_net)):
+            self.input_zero_convs.append(zero_module(conv_nd(self.unet.dims, ch[i], ch[i], 3, padding=1)))
+                
+        # self.freeze_control_net()
+        # self.unfreeze_unet()
+    
+    def copy_params(self):
+        unet_params = dict(self.unet.input_blocks.named_parameters())
+        ctrl_params = dict(self.control_net.named_parameters())
+        for p in unet_params:
+            ctrl_params[p].data.copy_(unet_params[p].data)
+        
+    def forward(self, inputs, timesteps=None, context=None, y=None, **kwargs):
+        assert (y is not None) == (
+            self.num_classes is not None
+        ), "must specify y if and only if the model is class-conditional"
+        hs = []
+        t_emb = timestep_embedding(timesteps, self.unet.model_channels, repeat_only=False)
+        emb = self.unet.time_embed(t_emb.to(inputs.dtype))
+        
+        x = th.index_select(inputs, 1, th.tensor([i for i in range(inputs.shape[1]) if i not in self.control_chn]).to(inputs.device))
+        ctrl = th.index_select(inputs, 1, th.tensor(self.control_chn).to(inputs.device))
+        zx = self.input_map(ctrl, emb, context) + x
+
+        if self.num_classes is not None:
+            assert y.shape == (x.shape[0],)
+            emb = emb + self.label_emb(y)
+
+        h = x.type(inputs.dtype)
+        zh = zx.type(inputs.dtype)
+        for module, ctrls, zero_conv in zip(self.unet.input_blocks, self.control_net, self.input_zero_convs):
+            h = module(h, emb, context)
+            zh = ctrls(zh, emb, context)
+            hs.append(h + zero_conv(zh))
+        h = self.unet.middle_block(h + self.middle_zero_conv(zh), emb, context)
+        for module in self.unet.output_blocks:
+            h = th.cat([h, hs.pop()], dim=1)
+            h = module(h, emb, context)
+        h = h.type(x.dtype)
+        if self.unet.predict_codebook_ids:
+            return self.unet.id_predictor(h)
+        else:
+            return self.unet.out(h)
     
 
 class RiskUNetModel(UNetModel):
-    def __init__(self, **unet_kwargs):
+    def __init__(self, latent_embed_dims=[512], **unet_kwargs):
         super().__init__(**unet_kwargs)
+        
+        self.fcn = nn.ModuleList()
+        self.fcn.append(nn.Linear(self.model_channels * self.channel_mult[-1], latent_embed_dims[0]))
+        for i in range(len(latent_embed_dims) - 1):
+            self.fcn.append(nn.Sequential(nn.ReLU(), nn.Linear(latent_embed_dims[i], latent_embed_dims[i+1])))
+        self.fcn = nn.Sequential(*self.fcn)
+        self.proj_in = nn.Conv1d(np.cumprod(self.image_size)[-1] // 8**(len(self.channel_mult)-1), 1, 1)
 
     def forward(self, x, timesteps=None, context=None, y=None,**kwargs):
         assert (y is not None) == (
@@ -849,7 +918,7 @@ class RiskUNetModel(UNetModel):
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
 
-        h = x.type(self.dtype)
+        h = x.type(x.dtype)
         for module in self.input_blocks:
             h = module(h, emb, context)
             hs.append(h)
@@ -860,6 +929,10 @@ class RiskUNetModel(UNetModel):
         z = z.type(x.dtype)
         
         z[:, 0] = z[:, 0] + z[:, 1]  # img = img + mask
+        
+        h = self.fcn(rearrange(h, "b c ... -> b (...) c"))
+        h = self.proj_in(h)
+        h = z.view(h.shape[0], -1)
         if self.return_latents:
             return (self.id_predictor(z) if self.predict_codebook_ids else self.out(z)), h
         else:

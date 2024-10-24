@@ -21,8 +21,6 @@ class BasePytorchLightningTrainer(pl.LightningModule):
     def __init__(self, ckpt_path=None):
         super().__init__()
         self.ckpt_path = ckpt_path
-        if self.ckpt_path is not None:
-            self.init_from_ckpt(self.ckpt_path)
         
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
         sd = torch.load(path, map_location="cpu")
@@ -45,6 +43,9 @@ class BasePytorchLightningTrainer(pl.LightningModule):
     @torch.no_grad()
     def get_input(self, batch, k):
         return batch.get(k)
+    
+    def set_precision(self, precision):
+        return self
     
     @property
     def dataset_connector(self):

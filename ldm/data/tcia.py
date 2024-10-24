@@ -135,21 +135,22 @@ class TCIA(Dataset):
 if __name__ == "__main__":
     def validate():
         from pathlib import Path
-        g_list = []
+        g_list = {"data": [], "no_mask": [], "small_mask": []}
         base = Path("/ailab/user/dailinrui/data/datasets/TCIA_processed")
         all_list = [str(_) for _ in base.rglob("*.nii.gz") if "tumorseg" not in str(_)]
         for subject in tqdm(all_list):
             if not os.path.exists(subject.replace(".nii.gz", "_tumorseg.nii.gz")):
                 print(f"{subject} has no mask")
+                g_list["no_mask"].append(str(subject))
                 continue
             mask = sitk.GetArrayFromImage(sitk.ReadImage(subject.replace(".nii.gz", "_tumorseg.nii.gz")))
             if mask.sum() > 50 and mask.max() == 1:
-                g_list.append(str(subject))
+                g_list["data"].append(str(subject))
             else:
                 print(f"{subject} has {mask.sum()} voxels of max val {mask.max()} < threshold 50")
-        
-        with open(base / "good_list.txt", 'w') as f:
-            f.write('\n'.join(g_list))
+                g_list["small_mask"].append(str(subject))
+        with open(base / "good_list.json", 'w') as f:
+            json.dump(g_list, f)
         
     def test():
         ds = TCIA(split="train", max_size=100)
