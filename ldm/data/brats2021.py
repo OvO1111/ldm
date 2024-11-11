@@ -36,7 +36,7 @@ class BraTS2021_3D(Dataset):
                                           output_size=crop_to, 
                                           foreground_prob=1.,) if crop_to is not None else identity,
             resize=tio.Resize(resize_to) if resize_to is not None else identity,
-            normalize_image=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=None, include=["image"]),
+            normalize_image=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(-5, 5), include=["image"]),
             normalize_mask=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(0, 3), include=["fine"])
         )
 
@@ -102,7 +102,7 @@ class BraTS2021_DA(BraTS2021_3D):
     def __init__(self, gen_train_folder=None, primary_batch_size=None, **kw):
         super().__init__(**kw)
         self.primary_batch_size = primary_batch_size
-        self.transforms["normalize_image"] = tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=None, include=["image", "raw"])
+        self.transforms["normalize_image"] = tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(-5, 5), include=["image", "raw"])
         if gen_train_folder is not None:
             self.train_keys += [os.path.join(gen_train_folder, _) for _ in os.listdir(gen_train_folder)]
             self.split_keys = getattr(self, f"{self.split}_keys")[:self.max_size]
@@ -170,7 +170,7 @@ class BraTS2021_3DFG(Dataset):
                                                             foreground_mask_label=None,
                                                             outline=(0, 0, 0)),),
             resize=tio.Resize(crop_to) if crop_to is not None else identity,
-            normalize_image=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=None, include=["image"]),
+            normalize_image=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(-5, 5), include=["image"]),
         )
 
         self.n_fine = n_fine
@@ -228,7 +228,6 @@ class BraTS2021_3DFG(Dataset):
 class BraTS2021_CL(Dataset):
     def __init__(self, split="train", 
                 crop_to=(96, 96, 96),
-                resize_to=None,
                 max_size=None,
                 n_fine=None,
                 no_mask_normalize=False,
@@ -241,7 +240,7 @@ class BraTS2021_CL(Dataset):
                                           crop_anchor="fine",
                                           output_size=crop_to, 
                                           foreground_prob=1.,) if crop_to is not None else identity,
-            normalize_image=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=None, include=["image"]),
+            normalize_image=tio.RescaleIntensity(out_min_max=(-1, 1), in_min_max=(-5, 5), include=["image"]),
             normalize_mask=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=(0, 3), include=["fine"])
         )
 
@@ -278,7 +277,7 @@ class BraTS2021_CL(Dataset):
         # random aug
         subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
         subject = {k: v.data for k, v in subject.items()} | {"ids": idx, 
-                                                             "mask": subject.fine.data if idx in self.fine_labeled_indices else subject.coarse.data * (-1), 
+                                                             "mask": subject.fine.data if idx in self.fine_labeled_indices else subject.coarse.data * (0), 
                                                              'casename': os.path.basename(self.split_keys[idx]).split('.')[0]}
         subject = subject | {'cond': torch.cat([subject['mask'], subject['coarse']])}
 

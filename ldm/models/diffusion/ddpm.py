@@ -72,7 +72,7 @@ def set_precision(precision):
                 module.weight.data = fn(module.weight.data) 
                 if module.bias is not None:
                     module.bias.data = fn(module.bias.data)
-    return _impl
+    return p, _impl
 
 
 def uniform_on_device(r1, r2, shape, device):
@@ -154,16 +154,9 @@ class DDPM(pl.LightningModule):
         self.logvar = self.logvar.to(self.device)
         
     def set_precision(self, precision):
-        # if precision == 16:
-        #     self.half()
-        #     self.model.half()
-        # elif precision == "bf16":
-        #     self.bfloat16()
-        # elif precision == 32:
-        #     self.float()
-        # elif precision == 64:
-        #     self.double()
-        self.model.diffusion_model.apply(set_precision(precision))
+        p, fn = set_precision(precision)
+        self.type(p)
+        self.model.diffusion_model.apply(fn)
         return self
 
     def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
@@ -514,7 +507,8 @@ class LatentDiffusion(DDPM):
             self.register_buffer('scale_factor', torch.tensor(scale_factor))
         self.instantiate_first_stage(first_stage_config)
         self.instantiate_cond_stage(cond_stage_config)
-        self.score_corrector_config = score_corrector_config
+        self.instantiate_score_corrector(score_corrector_config)
+        # self.score_corrector_config = score_corrector_config
         self.cond_stage_forward = cond_stage_forward
         self.clip_denoised = False
         self.bbox_tokenizer = None  
@@ -533,8 +527,8 @@ class LatentDiffusion(DDPM):
         ids = torch.round(torch.linspace(0, self.num_timesteps - 1, self.num_timesteps_cond)).long()
         self.cond_ids[:self.num_timesteps_cond] = ids
 
-    def on_train_start(self):
-        self.instantiate_score_corrector(self.score_corrector_config)
+    # def on_train_start(self):
+    #     self.instantiate_score_corrector(self.score_corrector_config)
 
     @rank_zero_only
     @torch.no_grad()
@@ -594,7 +588,7 @@ class LatentDiffusion(DDPM):
     def instantiate_score_corrector(self, config):
         if config is not None:
             self.ddim_score_corrector = instantiate_from_config(config)
-            self.ddim_score_corrector.to(self.device)
+            # self.ddim_score_corrector.to(self.device)
         else:
             self.ddim_score_corrector = None
 
@@ -1313,8 +1307,8 @@ class LatentDiffusion(DDPM):
         if ddim:
             ddim_sampler = DDIMSampler(self)
             shape = (self.channels, ) + tuple(self.image_size)
-            samples, intermediates = ddim_sampler.sample(ddim_steps,batch_size,
-                                                        shape,cond,verbose=False,score_corrector=self.ddim_score_corrector,**kwargs)
+            samples, intermediates = ddim_sampler.sample(ddim_steps, batch_size,
+                                                         shape, cond, verbose=False, score_corrector=self.ddim_score_corrector, **kwargs)
 
         else:
             samples, intermediates = self.sample(cond=cond, batch_size=batch_size,
@@ -1505,7 +1499,7 @@ class DiffusionWrapper(pl.LightningModule):
     
     
 class CoarseAndFineDiffusion(LatentDiffusion):
-    def __init__(self, foreground_loss_coef=1., foreground_fine_coef=1., n_fine=4, **kw):
+    def __init__(self, foreground_loss_coef=1., foreground_fine_coef=.5, n_fine=3, **kw):
         super().__init__(**kw)
         self.foreground_loss_coef = foreground_loss_coef
         self.foreground_fine_coef = foreground_fine_coef
@@ -1524,11 +1518,11 @@ class CoarseAndFineDiffusion(LatentDiffusion):
         else:
             raise NotImplementedError("unknown loss type '{loss_type}'")
         
-        loss = loss * (c[:, 0:1] * self.foreground_loss_coef + 1)  # boost foreground loss, chn0: fine, chn1: coarse
-        for i_fine in range(1, self.n_fine):
-            mask = c[:, 0:1] == i_fine
-            if mask.sum() > 0:
-                loss = loss * (mask * torch.clamp(c[:, 1].sum() / mask.sum(), 0, 1e2) * self.foreground_fine_coef + 1)
+        loss = loss * ((c[:, 1:2] > 0) * self.foreground_loss_coef + 1)  # boost foreground loss, chn0: fine, chn1: coarse
+        # for i_fine in range(1, self.n_fine):
+        #     mask = c[:, 0:1] == i_fine / self.n_fine
+        #     if mask.sum() > 0:
+        #         loss = loss * (mask * torch.clamp(c[:, 1].sum() / mask.sum(), 0, 1e2) * self.foreground_fine_coef + 1)
         return loss
     
     def on_fit_start(self):

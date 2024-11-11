@@ -11,6 +11,7 @@ import imageio
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.font_manager
+from functools import reduce
 from matplotlib.cm import get_cmap
 from torchvision.utils import make_grid
 from einops import rearrange
@@ -167,7 +168,7 @@ def combine_mask_and_im_v2(x,
     if h > num_images: colored_image = colored_image[:, ::h // num_images]
     colored_image = rearrange(colored_image, "b h w d c -> (b h) c w d")
     colored_image = make_grid(torch.tensor(colored_image), nrow=min(num_images, h), normalize=False, pad_value=255, padding=3)
-    return colored_image.squeeze().data.cpu().numpy()
+    return colored_image.squeeze().numpy()
         
 
 def visualize(image: torch.Tensor, n_mask: int=20, num_images=8, is_mask=False):
@@ -179,7 +180,7 @@ def visualize(image: torch.Tensor, n_mask: int=20, num_images=8, is_mask=False):
         b, h = image.shape[:2]
         if h > num_images: image = image[:, ::h // num_images]
         image = rearrange(image, "b h w d -> (b h) 1 w d")
-    else: return image.squeeze().data.cpu().numpy()
+    else: return image.squeeze().numpy()
     image = make_grid(image, nrow=min(num_images, h), normalize=not is_mask, pad_value=n_mask if is_mask else 1, padding=3)
 
     if is_mask:
@@ -187,15 +188,15 @@ def visualize(image: torch.Tensor, n_mask: int=20, num_images=8, is_mask=False):
         rgb = torch.tensor([(0, 0, 0)] + [cmap(i)[:-1] for i in (n_mask - np.arange(0., n_mask)) / n_mask], device=image.device)
         image = image.long().clip(0, n_mask)
         colored_mask = rearrange(rgb[image[0].long()], "i j n -> 1 n i j")
-        return colored_mask.squeeze().data.cpu().numpy()
+        return colored_mask.squeeze().numpy()
     else:
         image = (image - image.min()) / (image.max() - image.min())
-        return image.squeeze().data.cpu().numpy()
+        return image.squeeze().numpy()
     
 
 def make_gif(image: torch.Tensor, path: str, n_mask: int=20, num_images=-1, is_mask=False):
     is_mask = is_mask or image.dtype == torch.long
-    image = image.data.cpu().numpy()
+    image = image.numpy()
     if len(image.shape) == 5:
         image = image[:, 0] 
     if len(image.shape) == 4:
@@ -274,24 +275,28 @@ def image_logger(dict_of_images, path, log_separate=False, **kwargs):
     return image_from_plt
 
 
-class DistributedTwoStreamBatchSampler(DistributedSampler):
-    def __init__(self, dataset, primary_indices, secondary_indices, batch_size, secondary_batch_size,
-                 num_replicas=None, rank=None, shuffle=True,
-                 seed=0, drop_last: bool = False) -> None:
-        super().__init__(dataset=dataset, num_replicas=num_replicas, rank=rank, shuffle=shuffle, seed=seed,
-                         drop_last=drop_last)
-        self.batch_sampler = TwoStreamBatchSampler(primary_indices=primary_indices,
-                                                   secondary_indices=secondary_indices,
-                                                   batch_size=batch_size,
-                                                   secondary_batch_size=secondary_batch_size)
-        self.batch_size = batch_size
+class MultiStreamBatchSampler(Sampler):
+    def __init__(self, index_groups, batch_sizes, iterate_on=0, **kwargs):
+        self.batch_sizes = batch_sizes
+        self.index_groups = index_groups
+        self.iterate_on = iterate_on
+        self.batch_size = sum(self.batch_sizes)
+
+        assert all([len(index_group) >= self.batch_sizes[i] >= 0 for i, index_group in enumerate(self.index_groups)]),\
+            f"not all lengths of index group is larger than that of its corresponding batch size"
+        assert self.batch_sizes[self.iterate_on] > 0, f"iterate axis {self.iterate_on} must be of finite length" 
 
     def __iter__(self):
-        indices = list(super().__iter__())
-        return iter(self.batch_sampler)
-
-    def __len__(self) -> int:
-        return len(self.batch_sampler)
+        iters = [((iterate_once if i == self.iterate_on else iterate_eternally)(self.index_groups[i]), self.batch_sizes[i])
+                 for i in range(len(self.index_groups)) if len(self.batch_sizes[i]) > 0]
+        return (
+            reduce(lambda x, y: x + y, batches)
+            for batches
+            in zip(*[grouper(itr, bs) for itr, bs in iters])
+        )
+        
+    def __len__(self):
+        return len(self.index_groups[self.iterate_on]) // self.batch_sizes[self.iterate_on]
 
 
 class TwoStreamBatchSampler(Sampler):
@@ -328,43 +333,6 @@ class TwoStreamBatchSampler(Sampler):
         
     def __len__(self):
         if self.iterate_on_primary_indices: return len(self.primary_indices) // self.primary_batch_size
-        return len(self.secondary_indices) // self.secondary_batch_size
-    
-    
-class DistributedTwoStreamBatchSampler(DistributedSampler):
-    def __init__(self, primary_indices, secondary_indices, batch_size, secondary_batch_size, iterate_on_primary_indices=False, **kwargs):
-        self.batch_size = batch_size
-        self.primary_indices = primary_indices
-        self.secondary_indices = secondary_indices
-        self.secondary_batch_size = secondary_batch_size
-        self.primary_batch_size = batch_size - secondary_batch_size
-        self.iterate_on_primary_indices = iterate_on_primary_indices
-
-        assert len(self.primary_indices) >= self.primary_batch_size > 0,\
-            f"condition {len(self.primary_indices)} >= {self.primary_batch_size} > 0 is not satisfied"
-        if len(self.secondary_indices) < self.secondary_batch_size:
-            self.secondary_indices = self.secondary_indices + self.primary_indices
-            print("using coarse labels extracted from fine labels as supervision")
-        # assert len(self.secondary_indices) >= self.secondary_batch_size >= 0,\
-        #     f"condition {len(self.secondary_indices)} >= {self.secondary_batch_size} >= 0 is not satisfied"
-
-    def __iter__(self):
-        # primary_iter = iterate_eternally(self.primary_indices, len(self.secondary_indices) // len(self.primary_indices) if not self.iterate_on_primary_indices else 1)
-        if self.secondary_batch_size != 0:
-            primary_iter = iterate_once(self.primary_indices) if self.iterate_on_primary_indices else iterate_eternally(self.primary_indices)
-            secondary_iter = iterate_eternally(self.secondary_indices) if self.iterate_on_primary_indices else iterate_once(self.secondary_indices)
-            return (
-                primary_batch + secondary_batch
-                for (primary_batch, secondary_batch)
-                in zip(grouper(primary_iter, self.primary_batch_size),
-                    grouper(secondary_iter, self.secondary_batch_size))
-            )
-        else:
-            primary_iter = iterate_once(self.primary_indices)
-            return (primary_batch for primary_batch in grouper(primary_iter, self.primary_batch_size))
-        
-    def __len__(self):
-        if self.iterate_on_primary_indices: return len(self.primary_indices) // self.primary_batch_size 
         return len(self.secondary_indices) // self.secondary_batch_size
 
 

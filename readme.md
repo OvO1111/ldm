@@ -13,82 +13,45 @@ pip install -r requirements.txt
 
 ## Stage 0: write config file
 config files resides under `configs/`
-- autoencoder config files:
 ```
+# instantiate training module
 model:
-** take KL-AE as an example **
-  base_learning_rate: $LR
-  target: ldm.models.autoencoder.AutoencoderKL
+  train_target: ldm.models.ddpm.LatentDiffusion
+  test_target: inference.models.InferLatentDiffusion
+  test_only_params:
+    save_dataset: true
+    save_dataset_path: ...
+    suffix_keys: 
+      samples: .nii.gz
   params:
-    ** ldm.models.autoencoder.AutoencoderKL **'s keyword arguments
-    lossconfig:
-      target: ldm.modules.losses.LPIPSWithDiscriminator
-      params:
-        ...
+    ...
 
-    ddconfig:
-      ** ldm.modules.diffusionmodules.model.Encoder/Decoder **'s keyword arguments
-      ...
-    use_checkpoint: true          # use checkpoint to save GPU memory
-
+# instantiate dataset
 data:
-** take BraTS21 as an example **
   target: main.DataModuleFromConfig
   params:
     batch_size: 1
-    num_workers: 2
-    wrap: False
     train:
       target: ldm.data.brats2021.BraTS2021_3D
       params:
         split: train
-        crop_to: [64, 64, 64]
-    validation:
-      target: ldm.data.brats2021.BraTS2021_3D
-      params:
-        split: val
-        crop_to: [64, 64, 64]
-
--- logging arguments and pytorchlightning callbacks --
-...
-```
-- latentdiffusion config files:
-```
-model:
-  base_learning_rate: $LR
-  target: ldm.models.diffusion.ddpm.LatentDiffusion
-  params:
-    ...
-    first_stage_key: image      # data key
-    cond_stage_key: mask        # condition key
-    conditioning_key: concat    # conditional type
-    image_size: [8, 16, 16]     # after first-stage encoding
-    channels: 4                 # after first-stage encoding
-    ...
-
-    unet_config:
-      ** diffusion UNet config **
-      target: ldm.modules.diffusionmodules.openaimodel.UNetModel
-      params:
-        image_size: 64  # not used
         ...
-        use_checkpoint: True    # always use checkpoint to save GPU memory
 
-    first_stage_config:
-      ** your autoencoder setting, copy from autoencoder's config, with loss=nn.Identity **
-      ckpt_path: /path/to/your/pretrained/ae
-      ...
+# instantiate lightning logger
+lightning:
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        train_batch_frequency: 200
+        max_images: 20
 
-    cond_stage_config: 
-      ** use __is_unconditional__ if running without conditions, else follow the same format as above **
-      ...
-
-data:
-  ** same as in autoencoder config **
-  ...
-
--- logging arguments and pytorchlightning callbacks --
-...
+# instantiate trainer
+trainer:
+  benchmark: true
+  max_epochs: 1000
+  limit_test_batches: 100
+  resume_from_checkpoint: null
 ```
 
 ## Stage 1: train autoencoder
@@ -109,10 +72,9 @@ data:
 - `ldm/modules/diffusionmodules/openaimodel.py` ( diffusion UNet )
 - `ldm/models/diffusion/ddim.py` is for fast reverse sampling using DDIM
 
-
 # Inference command
-`python test.py --base $CFG_FILE --name $EXP_NAME --gpus 0,` 
-- CFG_FILE is specified like that in training cmd, the images and files will be stored under `<path_to_$EXP_NAME>/images/test`
+`python main.py --base $CFG_FILE --name $EXP_NAME --gpus 0,` 
+- CFG_FILE is specified like that in training cmd
 
 # References
 Refer to the following directories for more details

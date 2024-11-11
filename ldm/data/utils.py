@@ -7,8 +7,9 @@ import torch, random
 from typing import List
 from datetime import datetime
 from functools import reduce
-from collections import defaultdict, namedtuple, OrderedDict
+from scipy.ndimage import label
 from collections.abc import MutableMapping
+from collections import defaultdict, namedtuple, OrderedDict
 
 
 OrganTypeBase = namedtuple("OrganTypeBase", ["name", "label"])
@@ -54,6 +55,10 @@ class TotalsegOrganType:
 
         _flatten_dict_values(self.nested_organtypes)
         self.organtypes.update(_flatten_dict)
+        
+    def __getitem__(self, name):
+        name = name if name in self.organtypes else [i for i in self.organtypes.keys() if i.lower() == name.lower()][0]
+        return self.organtypes[name]
 
 TotalsegOrganTypeV1 = TotalsegOrganType("/ailab/user/dailinrui/code/latentdiffusion/dependency/totalseg_v1_label_mapping.txt")
 TotalsegOrganTypeV2 = TotalsegOrganType("/ailab/user/dailinrui/code/latentdiffusion/dependency/totalseg_v2_label_mapping.txt")
@@ -70,13 +75,10 @@ class LabelParser:
         label_ = np.zeros_like(label) if isinstance(label, np.ndarray) else torch.zeros_like(label) 
         for organ in organtype:
             label_index = organ.label
-            totalseg_indices = self.totalseg_decoder.organtypes[organ.name]
+            totalseg_indices = self.totalseg_decoder[organ.name]
             if isinstance(totalseg_indices, int): totalseg_indices = [totalseg_indices]
             for totalseg_index in totalseg_indices:
                 label_[label == totalseg_index] = label_index
-        # import SimpleITK as sitk
-        # sitk.WriteImage(sitk.GetImageFromArray(label[0].numpy().astype(np.uint8)), "/ailab/user/dailinrui/data/test_before_process.nii.gz")
-        # sitk.WriteImage(sitk.GetImageFromArray(label_[0].numpy().astype(np.uint8)), "/ailab/user/dailinrui/data/test_after_process.nii.gz")
         return label_
   
 
@@ -244,14 +246,14 @@ class TorchioForegroundCropper(tio.transforms.Transform):
         self.crop_anchor = crop_anchor
         super().__init__(**parent_kwargs)
         
-    def _patch_cropper(self, _image, _output_size, _mode="random"):
+    def _patch_cropper(self, _image, _output_size, _mode="random", _pad_value=0):
         # maybe pad image if _output_size is larger than _image.shape
         ph = max((_output_size[0] - _image.shape[1]) // 2 + 3, 0)
         pw = max((_output_size[1] - _image.shape[2]) // 2 + 3, 0)
         pd = max((_output_size[2] - _image.shape[3]) // 2 + 3, 0)
-        # _image = torch.nn.functional.pad(_image, (pd, pd, pw, pw, ph, ph), mode='constant', value=0)
-        # padder = lambda x: torch.nn.functional.pad(x, (pd, pd, ph, ph, pw, pw), mode='constant', value=0)
-        padder = identity
+        padder = lambda x: torch.nn.functional.pad(x, (pd, pd, ph, ph, pw, pw), mode='constant', value=0)
+        _image = padder(_image)
+        # padder = identity
             
         if _mode == "random":
             h_center = random.randint(ph, _image.shape[0] - ph)
@@ -259,9 +261,16 @@ class TorchioForegroundCropper(tio.transforms.Transform):
             d_center = random.randint(pd, _image.shape[2] - pd)
 
         elif _mode == "foreground":
-            hl, hr = torch.where(torch.any(torch.any(_image, 2), 2))[-1][[0, -1]]
-            wl, wr = torch.where(torch.any(torch.any(_image, 1), -1))[-1][[0, -1]]
-            dl, dr = torch.where(torch.any(torch.any(_image, 1), 1))[-1][[0, -1]]
+            if _image.sum() == 0: return self._patch_cropper(_image, _output_size, "random", _pad_value)
+            
+            _hl, _hr = torch.where(torch.any(torch.any(_image, 2), 2))[-1][[0, -1]]
+            _wl, _wr = torch.where(torch.any(torch.any(_image, 1), -1))[-1][[0, -1]]
+            _dl, _dr = torch.where(torch.any(torch.any(_image, 1), 1))[-1][[0, -1]]
+            _label, _n = label(_image[:, _hl: _hr + 1, _wl: _wr + 1, _dl: _dr + 1].numpy())
+            _label = torch.tensor(_label == random.randint(1, _n), dtype=_image.dtype)
+            hl, hr = torch.where(torch.any(torch.any(_label, 2), 2))[-1][[0, -1]] + _hl
+            wl, wr = torch.where(torch.any(torch.any(_label, 1), -1))[-1][[0, -1]] + _wl
+            dl, dr = torch.where(torch.any(torch.any(_label, 1), 1))[-1][[0, -1]] + _dl
             hc, hd = (hl + hr) // 2, hr - hl + 1
             wc, wd = (wl + wr) // 2, wr - wl + 1
             dc, dd = (dl + dr) // 2, dr - dl + 1
@@ -282,7 +291,7 @@ class TorchioForegroundCropper(tio.transforms.Transform):
         cropper = lambda x: x[:, h_left: h_right, w_left: w_right, d_left: d_right]
         post_padder = lambda x: torch.nn.functional.pad(x, 
                                                         (*d_offset, *w_offset, *h_offset),
-                                                        mode='constant', value=0)
+                                                        mode='constant', value=_pad_value)
             
         return padder, cropper, post_padder 
             
@@ -298,10 +307,12 @@ class TorchioForegroundCropper(tio.transforms.Transform):
         if self.crop_level == "patch":
             image_ = subject_[self.crop_anchor]
             output_size = self.crop_kwargs["output_size"]
+            pad_value = self.crop_kwargs.get('pad_value', 0)
             foreground_prob = self.crop_kwargs.get("foreground_prob", 0)
+            if callable(pad_value): pad_value = pad_value(subject_)
             
             mode = "foreground" if random.random() < foreground_prob else "random"
-            padder, cropper, post_padder = self._patch_cropper(image_, output_size, mode)
+            padder, cropper, post_padder = self._patch_cropper(image_, output_size, mode, pad_value)
             subject_ = {k: class_[k](tensor=post_padder(cropper(padder(v))), type=type_[k]) for k, v in subject_.items()}
         
         elif "foreground" in self.crop_level:

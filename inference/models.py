@@ -23,7 +23,6 @@ from ldm.models.diffusion.cdpm import CategoricalDiffusion, OneHotCategoricalBCH
 from ldm.models.diffusion.classifier import CharacteristicClassifier
 from ldm.models.downstream.efficient_subclass import EfficientSubclassSegmentation
 
-from ldm.models.diffusion.ddim import make_ddim_timesteps
 from ldm.modules.diffusionmodules.util import extract_into_tensor
 
 
@@ -187,7 +186,7 @@ class MakeDataset:
         self.base = dataset_base
         self.suffix_keys = suffix_keys
         self.create_split = create_split
-        self.overwrite = False
+        self.overwrite = overwrite
         
         self.dataset = defaultdict(dict)
         
@@ -198,16 +197,17 @@ class MakeDataset:
                 os.makedirs(os.path.join(self.base, suffix), exist_ok=True)
         
     def __add_version(self, olds, new, is_file=False):
-        if new in olds or os.path.basename(new) in olds:
+        if (new in olds or os.path.basename(new) in olds) and not self.overwrite:
             if is_file:
                 # olds: os.listdir, new: os.path.abspath
+                basename = os.path.basename(new)
                 dirname = os.path.dirname(new)
-                mtime = [(file, os.path.getmtime(os.path.join(dirname, file))) for file in olds if file.startswith(new.split('.')[0])]
+                mtime = [(file, os.path.getmtime(os.path.join(dirname, file))) for file in olds if file.startswith(basename.split('.')[0])]
                 max_time_file = max(mtime, key=lambda x: x[1])[0]
                 if 'version' in max_time_file: 
                     maxtime = int(max_time_file.split('.')[0][max_time_file.find('version') + len("version"):])
                 else: maxtime = 0
-                new = os.path.join(dirname, new.split('.')[0] + f"_version{maxtime + 1}" + ".".join(new.split('.')[1:]))
+                new = os.path.join(dirname, basename.split('.')[0] + f"_version{maxtime + 1}" + ".".join(basename.split('.')[1:]))
             else:
                 mpath = [(x, int(x.split('.')[0][x.find('version') + len('version'):]) if 'version' in x else 0) for x in olds if x.startswith(new.split('.')[0])]
                 max_version = max(mpath, key=lambda x: x[1])[1]
@@ -254,39 +254,6 @@ class MakeDataset:
                 
             elif isinstance(data, (str, tuple, list, dict)) and suffix == 'raw':
                 self.dataset[sample_names[0]][key] = str(data)
-            
-        # for key in self.include_keys:
-        #     value = samples[key]
-        #     for b in range(self.bs):
-        #         sample_name_b = sample_names[b]
-        #         if not isinstance(value, dict):
-        #             value = {"value": value}
-        #         for k, v in value.items():
-        #             value_b = v[b]
-        #             k = "_".join([key, k])
-        #             if isinstance(value_b, torch.Tensor):
-        #                 suffix = self.suffixes.get(key, self.suffixes.get(k, ""))
-        #                 f = os.path.join(self.base, k, sample_name_b + suffix)
-        #                 os.makedirs(os.path.dirname(f), exist_ok=True)
-        #                 if os.path.exists(f) and not self.overwrite:
-        #                     time = [(file, os.path.getmtime(os.path.join(os.path.dirname(f), file))) for file in os.listdir(os.path.dirname(f)) if file.startswith(f.split('.')[0])]
-        #                     maxtimefile = max(time, key=lambda x: x[1])[0]
-        #                     if 'version' in maxtimefile: 
-        #                         maxtime = int(maxtimefile.split('.')[0][maxtimefile.find('version') + len("version"):])
-        #                     else: maxtime = 0
-        #                     f = f.replace(suffix, f'_version{maxtime + 1}{suffix}')
-        #                     # print(f"found existent file, saving new one at {f}. if this is not desired, u can set MakeDataset().overwrite to be True")
-        #                 im = value_b.cpu().data.numpy().astype(dtypes.get(key, np.float32))
-        #                 if suffix == '.nii.gz':
-        #                     assert im.ndim == self.dims + 1, f"desired ndim {self.dims} and actual ndim {im.shape} not match"
-        #                     sitk.WriteImage(sitk.GetImageFromArray(rearrange(self.postprocess(im), "c ... -> ... c")), f)
-        #                     continue
-        #                 elif suffix == '.npy':
-        #                     np.save(f, im)
-        #                     continue
-        #                 self.dataset[sample_name_b][k] = "not saved"
-        #             else:
-        #                 self.dataset[sample_name_b][k] = value_b
         return ret_dict
                     
     def postprocess(self, sample):
@@ -312,39 +279,23 @@ class MakeDataset:
             json.dump(dataset, f, ensure_ascii=False, indent=4)
     
 
-class InferAutoencoderKL(AutoencoderKL, ComputeMetrics):
-    def __init__(self, eval_scheme=[1], **autoencoder_kwargs):
+class InferAutoencoderKL(AutoencoderKL):
+    def __init__(self, **autoencoder_kwargs):
         AutoencoderKL.__init__(self, **autoencoder_kwargs)
-        ComputeMetrics.__init__(self, eval_scheme)
         self.eval()
-        
-    def on_test_start(self, *args):
-        if MetricType.fid in self.eval_scheme:
-            self.fid = self.fid.to(self.device)
-        if MetricType.fvd in self.eval_scheme:
-            self.fvd = self.fvd.to(self.device)
         
     @torch.no_grad()
     def test_step(self, batch, batch_idx):
         pass
     
     @torch.no_grad()   
-    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, *args, **kwargs):
+    def log_images(self, batch, *args, **kwargs):
         logs = super(InferAutoencoderKL, self).log_images(batch, *args, **kwargs)
-        x = logs["inputs"]
-        x_recon = logs["reconstructions"]
-        
-        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
-            metrics = self.log_eval(x_recon, x, log_group_metrics_in_2d)
-            # print(metrics)
-            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            return metrics, logs
-        return {}, logs
+        return logs
     
     
-class InferAutoencoderVQ(VQModelInterface, ComputeMetrics, MakeDataset):
+class InferAutoencoderVQ(VQModelInterface, MakeDataset):
     def __init__(self, 
-                 eval_scheme=[1],
                  save_dataset=False,
                  save_dataset_path=None,
                  suffix_keys={"image":".nii.gz",},
@@ -354,39 +305,25 @@ class InferAutoencoderVQ(VQModelInterface, ComputeMetrics, MakeDataset):
             assert exists(save_dataset_path)
             MakeDataset.__init__(self, save_dataset_path, suffix_keys)
         VQModelInterface.__init__(self, **diffusion_kwargs)
-        ComputeMetrics.__init__(self, eval_scheme)
         self.eval()
-        
-    def on_test_start(self, *args):
-        if MetricType.fid in self.eval_scheme:
-            self.fid = self.fid.to(self.device)
-        if MetricType.fvd in self.eval_scheme:
-            self.fvd = self.fvd.to(self.device)
         
     @torch.no_grad()
     def test_step(self, batch, batch_idx):
         pass
     
     @torch.no_grad()   
-    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, *args, **kwargs):
+    def log_images(self, batch, *args, **kwargs):
         logs = super(VQModelInterface, self).log_images(batch, *args, **kwargs)
         x = logs["inputs"]
         x_recon = logs["reconstructions"]
         
         if self.save_dataset:
             self.add({"image": x_recon}, batch.get("casename"), dtypes={"image": np.uint8})
-        
-        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
-            metrics = self.log_eval(x_recon, x, log_group_metrics_in_2d)
-            # print(metrics)
-            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            return metrics, logs
-        return {}, logs
+        return logs
         
     
-class InferLatentDiffusion(LatentDiffusion, ComputeMetrics, MakeDataset):
+class InferLatentDiffusion(LatentDiffusion, MakeDataset):
     def __init__(self, 
-                 eval_scheme=[1],
                  save_dataset=False,
                  save_dataset_path=None,
                  suffix_keys={"data":".nii.gz",},
@@ -396,70 +333,32 @@ class InferLatentDiffusion(LatentDiffusion, ComputeMetrics, MakeDataset):
             assert exists(save_dataset_path)
             MakeDataset.__init__(self, save_dataset_path, suffix_keys)
         LatentDiffusion.__init__(self, **diffusion_kwargs)
-        ComputeMetrics.__init__(self, eval_scheme)
         self.eval()
-        
-    def on_test_start(self, *args):
-        if MetricType.fid in self.eval_scheme:
-            self.fid = self.fid.to(self.device)
-        if MetricType.fvd in self.eval_scheme:
-            self.fvd = self.fvd.to(self.device)
-        
+
     @torch.no_grad()
     def test_step(self, batch, batch_idx):
         pass
     
     @torch.no_grad()
-    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, *args, **kwargs):
+    def log_images(self, batch, *args, **kwargs):
         logs = super(InferLatentDiffusion, self).log_images(batch, *args, **kwargs)
-        
-        x = logs["inputs"]
-        x_samples = logs["samples"]
         if self.save_dataset:
             self.add(logs | batch, batch.get("casename"), dtypes={"image": np.float32})
-            
-        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
-            metrics = self.log_eval(x_samples, x, log_group_metrics_in_2d)
-            # print(metrics)
-            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            return metrics, logs
-        
-        return None, logs
+        return logs
     
 
-class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDataset):
+class InferCategoricalDiffusion(CategoricalDiffusion, MakeDataset):
     def __init__(self, 
-                 eval_scheme=[1],
                  save_dataset=False,
                  save_dataset_path=None,
                  suffix_keys={"data":".nii.gz",},
                  **diffusion_kwargs):
         CategoricalDiffusion.__init__(self, **diffusion_kwargs)
-        ComputeMetrics.__init__(self, eval_scheme)
         self.save_dataset = save_dataset
         if save_dataset:
             assert exists(save_dataset_path)
             MakeDataset.__init__(self, save_dataset_path, suffix_keys)
         self.eval()
-    
-    def on_test_start(self, *args):
-        if MetricType.fid in self.eval_scheme:
-            self.fid = self.fid.to(self.device)
-        if MetricType.fvd in self.eval_scheme:
-            self.fvd = self.fvd.to(self.device)
-    
-    @rank_zero_only
-    def on_test_end(self, *args):
-        if self.save_dataset:
-            # datasets = torch.distributed.gather_object(self.dataset)
-            # metrics = torch.distributed.gather_object(self.metrics)
-            datasets = self.dataset
-            metrics = [self.metrics]
-            mean_metrics = {"mean_metrics": {m: np.mean([c[m] for c in metrics]) for m in metrics[0].keys()},
-                            "ind_metrics": metrics}
-            self.finalize(datasets, mean_metrics)
-        else:
-            self.finalize()
         
     @torch.no_grad()
     def test_step(self, batch, batch_idx):
@@ -620,7 +519,7 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
         return logs
     
     @torch.no_grad()
-    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, **kwargs):
+    def log_images(self, batch, **kwargs):
         logs = super(InferCategoricalDiffusion, self).log_images(batch, **kwargs)
         x = logs["inputs"]
         x_recon = logs["samples"]
@@ -629,13 +528,7 @@ class InferCategoricalDiffusion(CategoricalDiffusion, ComputeMetrics, MakeDatase
         
         if self.save_dataset:
             self.add({"inputs": x, "samples": x_recon}, batch.get("casename"), dtypes={"inputs": np.uint8, "samples": np.uint8})
-        
-        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
-            metrics = self.log_eval(x_recon, x, log_group_metrics_in_2d)
-            # print(metrics)
-            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            return metrics, logs
-        return {}, logs
+        return logs
     
     def postprocess(self, sample):
         # n h w d
@@ -712,7 +605,7 @@ class InferMixedDiffusion(InferLatentDiffusion):
         return nn.functional.interpolate(tensor, *args, **kwargs)
     
     @torch.no_grad()
-    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, alpha=.2, *args, **kwargs):
+    def log_images(self, batch, alpha=.2, *args, **kwargs):
         # alpha is the mixup ratio, mix=alpha*sample+(1-alpha)*gt lower -> more fine gt ; higher -> more generated
         logs = dict()
         z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key,
@@ -857,25 +750,17 @@ class InferMixedDiffusion(InferLatentDiffusion):
                      dtypes={"mixed_fine": np.uint8, "mixed_coarse": np.uint8},
                      b_mapping=mapping)
         
-        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
-            metrics = self.log_eval(x_samples, x, log_group_metrics_in_2d)
-            # print(metrics)
-            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            return metrics, logs
-        
-        return None, logs
+        return logs
     
     
-class InferMixedAutoencoderVQ(VQModelInterface, ComputeMetrics, MakeDataset):
+class InferMixedAutoencoderVQ(VQModelInterface, MakeDataset):
     def __init__(self, 
-                 eval_scheme=[1],
                  save_dataset=False,
                  save_dataset_path=None,
                  include_keys=["data", "text"],
                  suffix_keys={"data":".nii.gz",},
                  **diffusion_kwargs):
         VQModelInterface.__init__(self, **diffusion_kwargs)
-        ComputeMetrics.__init__(self, eval_scheme)
         self.save_dataset = save_dataset
         if save_dataset:
             assert exists(save_dataset_path)
@@ -933,7 +818,7 @@ class InferMixedAutoencoderVQ(VQModelInterface, ComputeMetrics, MakeDataset):
         pass
     
     @torch.no_grad()
-    def log_images(self, batch, log_metrics=False, log_group_metrics_in_2d=False, alpha=.2, *args, **kwargs):
+    def log_images(self, batch, alpha=.2, *args, **kwargs):
         logs = dict()
         logs["inputs"] = self.get_input(batch, self.image_key)
         B = logs["inputs"].shape[0]
@@ -997,15 +882,8 @@ class InferMixedAutoencoderVQ(VQModelInterface, ComputeMetrics, MakeDataset):
                      dtypes={"mixed_fine": np.uint8, "mixed_coarse": np.uint8},
                      b_mapping=mapping)
         
-        if self.eval_scheme is not None and len(self.eval_scheme) > 0 and log_metrics:
-            metrics = self.log_eval(i_mix, i, log_group_metrics_in_2d)
-            # print(metrics)
-            self.log_dict(metrics, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            return metrics, logs
-        
-        return None, logs
+        return logs
     
-
 
 class InferSubclassSegmentation(EfficientSubclassSegmentation, MakeDataset):
     def __init__(self, 

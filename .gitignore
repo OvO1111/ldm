@@ -4,7 +4,7 @@ compr
 
 # ignore slurm runs
 run/
-data_ln
+data_ln/
 runs/
 wandb/
 
@@ -31,3 +31,5 @@ configs/categorical-diffusion/ensemble*
 ldm/modules/vision_mamba.py
 inference/fvd.py
 inference/metric_cal.py
+
+*.json

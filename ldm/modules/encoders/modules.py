@@ -300,11 +300,11 @@ class FrozenBERTEmbedder(AbstractEncoder):
 
 
 class ResizeConditionEncoder(nn.Module):
-    def __init__(self, input_size=None, output_size=None, output_dtype='float'):
+    def __init__(self, input_size=None, output_size=None, resize_mode='trilinear'):
         super().__init__()
         self.input_size = omegaconf.OmegaConf.to_container(input_size)
         self.output_size = omegaconf.OmegaConf.to_container(output_size)
-        self.dtype = torch.float32 if output_dtype == 'float' else torch.long
+        self.resize_mode = resize_mode
         
     def forward(self, *a, **kw):
         return self.encode(*a, **kw)
@@ -313,17 +313,13 @@ class ResizeConditionEncoder(nn.Module):
         if self.output_size is None:
             return tensor
         dtype = tensor.dtype
-        if self.dtype == torch.float32:
-            return nn.functional.interpolate(tensor.float(), self.output_size, mode='trilinear' if tensor.ndim == 5 else 'bilinear').to(dtype)
-        return nn.functional.interpolate(tensor.long(), self.output_size, mode='nearest').to(dtype)
+        return nn.functional.interpolate(tensor, self.output_size, mode=self.resize_mode).to(dtype)
     
     def decode(self, tensor: torch.Tensor):
         if self.input_size is None:
             return tensor
         dtype = tensor.dtype
-        if self.dtype == torch.float32:
-            return nn.functional.interpolate(tensor.float(), self.input_size, mode='trilinear' if tensor.ndim == 5 else 'bilinear').to(dtype)
-        return nn.functional.interpolate(tensor.long(), self.input_size, mode='nearest').to(dtype)
+        return nn.functional.interpolate(tensor, self.input_size, mode=self.resize_mode).to(dtype)
     
     
 class LinearEmbedder(nn.Module):

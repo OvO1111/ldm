@@ -1,6 +1,6 @@
 model:
   base_learning_rate: 2.e-5
-  target: inference.models.InferLatentDiffusion
+  test_target: inference.models.InferLatentDiffusion
   params:
     linear_start: 0.0015
     linear_end: 0.0195
@@ -22,20 +22,18 @@ model:
     monitor: val/loss_simple
     cond_stage_trainable: false
     use_ema: false
-    use_window_norm: false
     ckpt_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/checkpoints/epoch=000234.ckpt
     # ckpt_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128_wo_cam/checkpoints/last.ckpt
 
     save_dataset: true 
-    save_dataset_path: /ailab/user/dailinrui/data/vis/vis/
+    save_dataset_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128_wo_cam/dataset_nomask
     # save_dataset_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128_wo_cam/dataset_noddim
     # save_dataset_path: /ailab/user/dailinrui/data/ldm/guidegen_ldm_128_128_128/dataset_noddim
-    include_keys: [samples, inputs, cond, prompt]
     suffix_keys: 
       samples: .nii.gz
       cond: .nii.gz
       # conditioning_c_crossattn: .dummy
-      inputs: .nii.gz
+      # inputs: .nii.gz
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
@@ -121,7 +119,7 @@ model:
       # target: torch.nn.Identity
 
 data:
-  target: test.DataModuleFromConfig
+  target: main.DataModuleFromConfig
   params:
     batch_size: 1
     num_workers: 4
@@ -142,7 +140,7 @@ data:
 lightning:
   callbacks:
     image_logger:
-      target: test.ImageLogger
+      target: main.ImageLogger
       params:
         test_batch_frequency: 1
         max_images: 10
@@ -161,4 +159,4 @@ lightning:
   trainer:
     benchmark: True
     max_epochs: 1000
-    limit_test_batches: 100
+    limit_test_batches: 128

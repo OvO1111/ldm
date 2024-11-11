@@ -1,6 +1,8 @@
 model:
-  base_learning_rate: 2.e-5
-  target: ldm.models.diffusion.cdpm.CategoricalDiffusion
+  base_learning_rate: 2.e-6
+  experiment_name: brats21_cdm_128_128_128_fine_ft
+  train_target: ldm.models.diffusion.cdpm.CategoricalDiffusion
+  test_target: inference.models.InferCategoricalDiffusion
   params:
     linear_start: 1e-2
     linear_end: 0.2
@@ -36,6 +38,15 @@ model:
     crossattn_encoder_config:
       target: torch.nn.Identity
 
+  test_only_params:
+    ckpt_path: /ailab/user/dailinrui/data/ldm/brats21_cdm_128_128_128_fine_ft/checkpoints/epoch=000038.ckpt
+    save_dataset: true 
+    save_dataset_path: /ailab/user/dailinrui/data/ldm/brats21_cdm_128_128_128_fine_ft/dataset_v2
+    include_keys: [inputs, samples]
+    suffix_keys: 
+      inputs: .nii.gz
+      samples: .nii.gz
+
 data:
   target: main.DataModuleFromConfig
   params:
@@ -56,15 +67,21 @@ data:
         resize_to: [128, 128, 128]
         no_mask_normalize: true
         max_size: 5
+    test:
+      target: ldm.data.brats2021.BraTS2021_3D
+      params:
+        split: test
+        resize_to: [128, 128, 128]
+        no_mask_normalize: true
+        max_size: null
 
 lightning:
   callbacks:
     image_logger:
       target: main.ImageLogger
       params:
-        train_batch_frequency: 1
-        val_batch_frequency: 1
-        max_images: 10
+        train_batch_frequency: 200
+        max_images: 20
         logger:
           inputs: 
             target: mask_rescale
@@ -80,6 +97,8 @@ lightning:
               n_mask: 4
 
   trainer:
-    benchmark: True
+    benchmark: true
     accumulate_grad_batches: 1
-    max_epochs: 1000
+    max_epochs: 200
+    replace_sampler_ddp: false
+    limit_test_batches: 3200

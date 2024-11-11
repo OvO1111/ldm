@@ -8,9 +8,47 @@ import torch.nn as nn
 import SimpleITK as sitk
 from tqdm import tqdm
 from einops import rearrange
+import sys
+sys.path.append('/ailab/user/dailinrui/code/latentdiffusion')
 from ldm.util import instantiate_from_config
 from ldm.modules.diffusionmodules.util import make_beta_schedule
 from torch.distributions.one_hot_categorical import OneHotCategorical
+
+
+def set_precision(precision):
+    if precision in [16, "16", "fp16", torch.float16]:
+        p = torch.float16
+        fn = lambda tensor: tensor.half()
+    elif precision in ["bf16", torch.bfloat16]:
+        p = torch.bfloat16
+        fn = lambda tensor: tensor.bfloat16()
+    elif precision in [32, "32", "fp32", torch.float32]:
+        p = torch.float32
+        fn = lambda tensor: tensor.float()
+    elif precision in [64, "64", "fp64", "double", torch.double, torch.float64]:
+        p = torch.float64
+        fn = lambda tensor: tensor.double()
+    else:
+        raise ValueError(f"Unsupported precision: {precision}")
+    
+    def _impl(x):   
+        x.dtype = p
+        for module in x.modules():
+            if isinstance(module, nn.modules.conv._ConvNd):
+                module.weight.data = fn(module.weight.data)
+                module.bias.data = fn(module.bias.data)
+            elif isinstance(module, (
+                nn.modules.normalization.GroupNorm,
+                nn.modules.normalization.LayerNorm,
+                nn.modules.batchnorm._BatchNorm
+            )):
+                module.weight.data = fn(module.weight.data)
+                module.bias.data = fn(module.bias.data)
+            elif isinstance(module, nn.Linear):
+                module.weight.data = fn(module.weight.data) 
+                if module.bias is not None:
+                    module.bias.data = fn(module.bias.data)
+    return p, _impl
 
 
 class OneHotCategoricalBCHW(OneHotCategorical):
@@ -202,6 +240,12 @@ class CategoricalDiffusion(pl.LightningModule):
             print(f"Missing Keys: {missing}")
         if len(unexpected) > 0:
             print(f"Unexpected Keys: {unexpected}")
+            
+    def set_precision(self, precision):
+        p, fn = set_precision(precision)
+        self.type(p)
+        self.model.diffusion_model.apply(fn)
+        return self
         
     def on_fit_start(self):
         self.weight = self.weight.to(self.device)
@@ -407,5 +451,26 @@ class DiffusionWrapper(pl.LightningModule):
         else:
             raise NotImplementedError()
 
-        return out                
+        return out         
+    
+    
+if __name__ == '__main__':
+    model = CategoricalDiffusion(dict(
+        target="ldm.modules.diffusionmodules.openaimodel.RiskUNetModel",
+        params=dict(
+            image_size=[64, 64, 64],
+            in_channels=1,
+            out_channels=1,
+            model_channels=64,
+            attention_resolutions=[],
+            num_res_blocks=2,
+            channel_mult=[1, 2, 4],
+            num_head_channels=32,
+            use_checkpoint=True, # always use ckpt
+            return_latents=True))
+    )
+    inputs = torch.zeros((1, 20, 1, 1, 1))
+    inputs[:, 0] = 1
+    probs = [model.q_xt_given_x0(inputs, t).probs for t in range(1, 1001, 100)]
+    print(["\t".join(probs[i]) for i in range(len(probs))])
             

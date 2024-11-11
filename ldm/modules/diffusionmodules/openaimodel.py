@@ -843,7 +843,7 @@ class ControlNetUNetModelLegacy(nn.Module):
             nn.SiLU(),
             conv_nd(self.unet.dims, 16, 32, 3, padding=1),
             nn.SiLU(),
-            zero_module(conv_nd(self.dims, 32, self.in_channels, 3, padding=1))
+            zero_module(conv_nd(self.unet.dims, 32, self.unet.in_channels, 3, padding=1))
         )
         self.control_net = copy.deepcopy(self.unet.input_blocks)
         
@@ -864,7 +864,7 @@ class ControlNetUNetModelLegacy(nn.Module):
         
     def forward(self, inputs, timesteps=None, context=None, y=None, **kwargs):
         assert (y is not None) == (
-            self.num_classes is not None
+            self.unet.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
         hs = []
         t_emb = timestep_embedding(timesteps, self.unet.model_channels, repeat_only=False)
@@ -874,9 +874,9 @@ class ControlNetUNetModelLegacy(nn.Module):
         ctrl = th.index_select(inputs, 1, th.tensor(self.control_chn).to(inputs.device))
         zx = self.input_map(ctrl, emb, context) + x
 
-        if self.num_classes is not None:
+        if self.unet.num_classes is not None:
             assert y.shape == (x.shape[0],)
-            emb = emb + self.label_emb(y)
+            emb = emb + self.unet.label_emb(y)
 
         h = x.type(inputs.dtype)
         zh = zx.type(inputs.dtype)

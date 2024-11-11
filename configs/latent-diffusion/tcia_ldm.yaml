@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 1.e-4
+  base_learning_rate: 2.e-5
   experiment_name: tcia_ldm_64_64_64
   train_target: ldm.models.diffusion.ddpm.RiskDiffusion
   test_target: inference.models.InferLatentDiffusion
@@ -10,28 +10,29 @@ model:
     log_every_t: 200
     timesteps: 1000
     loss_type: l1
-    first_stage_key: image_and_seg
+    first_stage_key: image
     cond_stage_key: survival
     conditioning_key: crossattn
     image_size: [64, 64, 64]  # after first-stage encoding
-    channels: 2  # after first-stage encoding
+    channels: 1  # after first-stage encoding
     monitor: val/loss_simple_ema
     cond_stage_trainable: true
-    score_corrector_config: 
-      target: ldm.models.diffusion.ddim.FMCIBScoreCorrector
-      params:
-        classifier_scale: 1.
-        weight_decay: 0.999
-        betas: [0.1, 0.01]
-        lr: 1e-2
-        use_optimizer_on_classifier_scale: true
+    score_corrector_config: null
+    # score_corrector_config:
+      # target: ldm.models.diffusion.ddim.FMCIBScoreCorrector
+      # params:
+      #   classifier_scale: 1.
+      #   weight_decay: 0.999
+      #   betas: [0.1, 0.01]
+      #   lr: 1e-2
+      #   use_optimizer_on_classifier_scale: true
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.RiskUNetModel
       params:
         image_size: [64, 64, 64]
-        in_channels: 2
-        out_channels: 2
+        in_channels: 1
+        out_channels: 1
         model_channels: 64
         attention_resolutions: []
         num_res_blocks: 2
@@ -64,35 +65,50 @@ data:
   target: main.DataModuleFromConfig
   params:
     batch_size: 4  # train batch size, test is default to test_batch_size=1
-    num_workers: 16
+    num_workers: 8
     wrap: False
     train:
       target: ldm.data.tcia.TCIA
       params:
         split: train
+        eventime_strat: 12
         max_size: null
-        use_datasets: null
+        use_datasets: [NSCLC-Radiomics, "NSCLC Radiogenomics", "TCGA-LUAD", "CPTAC-LSCC", "CPTAC-LUAD", ]
         tcia_transform_config: 
-          resize_or_crop: crop
-          output_size: [64, 64, 64]
+          target: ldm.data.tcia.TCIATransform
+          params:
+            window_level: 200
+            window_width: 1800
+            resize_or_crop: crop
+            output_size: [64, 64, 64]
     validation:
       target: ldm.data.tcia.TCIA
       params:
         split: val
         max_size: null
-        use_datasets: null
+        eventime_strat: 12
+        use_datasets: [NSCLC-Radiomics, "NSCLC Radiogenomics", "TCGA-LUAD", "CPTAC-LSCC", "CPTAC-LUAD", ]
         tcia_transform_config: 
-          resize_or_crop: crop
-          output_size: [64, 64, 64]
+          target: ldm.data.tcia.TCIATransform
+          params:
+            window_level: 200
+            window_width: 1800
+            resize_or_crop: crop
+            output_size: [64, 64, 64]
     test:
       target: ldm.data.tcia.TCIA
       params:
         split: val
         max_size: null
-        use_datasets: null
+        eventime_strat: 12
+        use_datasets: [NSCLC-Radiomics, "NSCLC Radiogenomics", "TCGA-LUAD", "CPTAC-LSCC", "CPTAC-LUAD", ]
         tcia_transform_config: 
-          resize_or_crop: crop
-          output_size: [64, 64, 64]
+          target: ldm.data.tcia.TCIATransform
+          params:
+            window_level: 200
+            window_width: 1800
+            resize_or_crop: crop
+            output_size: [64, 64, 64]
 
 lightning:
   callbacks:
@@ -108,6 +124,8 @@ lightning:
             target: image_rescale
           samples:
             target: image_rescale
+          prompt:
+            target: text
 
   trainer:
     benchmark: true

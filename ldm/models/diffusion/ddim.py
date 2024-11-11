@@ -322,13 +322,14 @@ class DDIMSampler(object):
         return x_prev, pred_x0
 
     
-class FMCIBScoreCorrector:
+class FMCIBScoreCorrector(torch.nn.Module):
     def __init__(self, 
                  classifier_scale=1.,
                  weight_decay=.999,
                  betas=(0.1, 0.01),
                  lr=1e-2,
                  use_optimizer_on_classifier_scale=True):
+        super().__init__()
         self.classifier_scale = torch.ones(1) * classifier_scale
         
         self.m_t, self.v_t = 0, 0

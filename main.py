@@ -21,7 +21,7 @@ from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.utilities import rank_zero_only, rank_zero_info
 
 from ldm.util import instantiate_from_config, get_obj_from_str
-from inference.utils import TwoStreamBatchSampler, DistributedTwoStreamBatchSampler, image_logger, visualize, combine_mask_and_im_v2
+from inference.utils import TwoStreamBatchSampler, image_logger, visualize, combine_mask_and_im_v2
 
 
 def exists(x):
@@ -247,7 +247,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
                             collate_fn=getattr(self.datasets["validation"], "collate", _utils.collate.default_collate))
         
     def _test_dataloader(self, shuffle=False):
-        use_batch_sampler = self.has_batch_sampler and 'train' in self.use_sampler_on_ds
+        use_batch_sampler = self.has_batch_sampler and 'test' in self.use_sampler_on_ds
         if not use_batch_sampler:
             return cycle(DataLoader(self.datasets["test"],
                                     batch_size=self.test_batch_size,
@@ -289,7 +289,6 @@ class SetupCallback(Callback):
         os.makedirs(self.cfgdir, exist_ok=True)
         if trainer.global_rank == 0:
             # Create logdirs and save configs
-
             if "callbacks" in self.lightning_config:
                 if 'metrics_over_trainsteps_checkpoint' in self.lightning_config['callbacks']:
                     os.makedirs(os.path.join(self.ckptdir, 'trainstep_checkpoints'), exist_ok=True)
@@ -362,10 +361,12 @@ class ImageLogger(Callback):
             if not isinstance(params, dict): params = OmegaConf.to_container(params)
             if target == "mask_rescale":
                 return lambda x: visualize(x.long(), **(params | {"is_mask": True}))
-            if target == "image_rescale":
+            elif target == "image_rescale":
                 return lambda x: visualize((x.float() - x.min()) / (x.max() - x.min()), **params)
-            if target == "image_and_mask":
+            elif target == "image_and_mask":
                 return lambda x: combine_mask_and_im_v2(x.float(), **params)
+            else:
+                return lambda x: x
         
         self.keep_queue_tr = Queue(self.max_images)
         self.keep_queue_val = Queue(self.max_images)
@@ -424,17 +425,19 @@ class ImageLogger(Callback):
                 hasattr(pl_module, "log_images") and
                 callable(pl_module.log_images)):
             logger = type(pl_module.logger)
-
+            
+            images = {}
             is_train = pl_module.training
             if is_train:
                 pl_module.eval()
             with torch.no_grad():
-                images = pl_module.log_images(batch, split=split, **self.log_images_kwargs)
-                if isinstance(images, tuple): metrics, images = images
+                _images = pl_module.log_images(batch, split=split, **self.log_images_kwargs)
 
-            for k in images:
-                if isinstance(images[k], torch.Tensor):
-                    images[k] = images[k].detach().cpu()
+            for k in _images:
+                if isinstance(_images[k], torch.Tensor):
+                    _images[k] = _images[k].detach().cpu()
+                if k in self.logger:
+                    images[k] = _images[k]
 
             local_images = self.log_local(pl_module.logger.save_dir, split, images,
                                           pl_module.global_step, pl_module.current_epoch, batch_idx)
@@ -468,7 +471,7 @@ class ImageLogger(Callback):
         return False
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if self.is_training and (pl_module.global_step > 0 or self.log_first_step):
+        if self.is_training and pl_module.global_step > 0:
             self.log_img(pl_module, batch, batch_idx, split="train")
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):

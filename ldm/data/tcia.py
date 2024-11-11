@@ -27,15 +27,17 @@ class TCIATransform:
                  window_level=60,
                  window_width=360,
                  in_minmax=(-1500, 1500),
-                 out_minmax=(-1, 1),
+                 out_minmax=(0, 1),
                  resize_or_crop="crop",
                  output_size=(64, 64, 64),):
         window_norm = invertible_window_norm(window_level, window_width, in_minmax=in_minmax, out_minmax=out_minmax)
         self.preprocess = [
+            tio.Resize((128, 256, 256)),
             TorchioForegroundCropper(crop_level="patch", 
                                      crop_anchor="tumorseg",
                                      foreground_prob=1.,
                                      output_size=output_size,
+                                     pad_value=window_norm.out_min,
                                      parent_kwargs={"include": ["image", 'tumorseg']}) 
             if resize_or_crop == "crop" else tio.Resize(output_size),
             tio.Lambda(window_norm.encode, include=["image"]),
@@ -43,12 +45,30 @@ class TCIATransform:
         self.postprocess = [
             tio.Lambda(window_norm.decode, include=["image"]),
         ]
+        
+        
+class TCIATransformWoNorm:
+    def __init__(self, 
+                 resize_or_crop="crop",
+                 output_size=(64, 64, 64),):
+        self.preprocess = [
+            tio.Resize((128, 256, 256)),
+            TorchioForegroundCropper(crop_level="patch", 
+                                     crop_anchor="tumorseg",
+                                     foreground_prob=1.,
+                                     output_size=output_size,
+                                     pad_value=0,
+                                     parent_kwargs={"include": ["image", 'tumorseg']}) 
+            if resize_or_crop == "crop" else tio.Resize(output_size),
+            tio.RescaleIntensity(out_min_max=(0,1), include=["image"])
+        ]
+        self.postprocess = []
 
 
 class TCIA(Dataset):
     def __init__(self, 
                  split="train", 
-                 eventime_strat=12,
+                 eventime_strat=None,
                  max_size:int = None,
                  use_datasets: list=None,
                  tcia_transform_config = None,
@@ -69,12 +89,12 @@ class TCIA(Dataset):
             for d in self.ds:
                 self.data_keys.extend([_.strip() for _ in data if d in _])
 
-        self.transforms = TCIATransform(**tcia_transform_config)
+        self.transforms = instantiate_from_config(tcia_transform_config)
 
         self.split = split
         train_keys = self.data_keys[:round(len(self.data_keys) * 0.8)]
         val_keys = self.data_keys[round(len(self.data_keys) * 0.8):]
-        test_keys = self.data_keys[round(len(self.data_keys) * 0.8):]
+        test_keys = val_keys
 
         self.train_keys, self.val_keys, self.test_keys = load_or_write_split(self.base,
                                                                              True,
@@ -102,11 +122,13 @@ class TCIA(Dataset):
     
     def parse_from_clinicals(self, clinicals, ds_index):
         survival = clinicals["survival"]
-        return {"survival": torch.tensor([
-            as_float(survival["survival_time"], divisor=365, max_val=self.eventime_strat-1),
-            as_float(survival["survival_event"]),
-            ds_index,
-        ])[:, None].float()}
+        return {
+            "survival": torch.tensor([
+                            as_float(survival["survival_time"], divisor=365, max_val=self.eventime_strat-1) if self.eventime_strat is not None else as_float(survival["survival_time"]),
+                            as_float(survival["survival_event"]),
+                            ds_index,
+                        ])[:, None].float(), 
+            "prompt": f"survival time: {survival['survival_time']}, survival censor: {survival['survival_event']}"}
 
     def __getitem__(self, idx):
         image_nii = self.split_keys[idx]
@@ -115,8 +137,10 @@ class TCIA(Dataset):
         with open(image_nii.replace(".nii.gz", ".json")) as f:
             clinicals = json.load(f)
             
-        image = nib.load(image_nii).get_fdata()
-        tumorseg = nib.load(tumorseg_nii).get_fdata()
+        # image = nib.load(image_nii).get_fdata()
+        # tumorseg = nib.load(tumorseg_nii).get_fdata()
+        image = sitk.GetArrayFromImage(sitk.ReadImage(image_nii)).astype(np.float32)
+        tumorseg = sitk.GetArrayFromImage(sitk.ReadImage(tumorseg_nii)).astype(np.float32)
         sample = {
             "image": tio.ScalarImage(tensor=image[None]),
             "tumorseg": tio.ScalarImage(tensor=tumorseg[None]),
@@ -150,7 +174,7 @@ if __name__ == "__main__":
                 print(f"{subject} has {mask.sum()} voxels of max val {mask.max()} < threshold 50")
                 g_list["small_mask"].append(str(subject))
         with open(base / "good_list.json", 'w') as f:
-            json.dump(g_list, f)
+            json.dump(g_list, f, indent=4)
         
     def test():
         ds = TCIA(split="train", max_size=100)

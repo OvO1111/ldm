@@ -1,10 +1,16 @@
 ### Tumor Generateion
+import sys
+sys.path.append("/ailab/user/dailinrui/code/latentdiffusion/")
+import json
 import random
 import cv2, os
 import elasticdeform
 import SimpleITK as sitk
 import numpy as np
+from tqdm import tqdm
+from pathlib import Path
 from scipy.ndimage import gaussian_filter
+from ldm.data.utils import LabelParser, OrganTypeBase
 
 
 def generate_prob_function(mask_shape):
@@ -80,7 +86,8 @@ def random_select(mask_scan):
     z_start, z_end = np.where(np.any(mask_scan, axis=(0, 1)))[0][[0, -1]]
 
     # we need to strict number z's position (0.3 - 0.7 in the middle of liver)
-    z = round(random.uniform(0.3, 0.7) * (z_end - z_start)) + z_start
+    # , which should not be necessary since we are no longer doing mask generation in liver only
+    z = round(random.uniform(0.01, 0.99) * (z_end - z_start)) + z_start
 
     liver_mask = mask_scan[..., z]
 
@@ -89,6 +96,9 @@ def random_select(mask_scan):
     liver_mask = cv2.erode(liver_mask, kernel, iterations=1)
 
     coordinates = np.argwhere(liver_mask == 1)
+    if len(coordinates) == 0: 
+        print(f"no valid points found on z={z}")
+        return random_select(mask_scan)  # handle edge scenarios
     random_index = np.random.randint(0, len(coordinates))
     xyz = coordinates[random_index].tolist() # get x,y
     xyz.append(z)
@@ -351,8 +361,6 @@ def SynthesisTumor(mask_scan, tumor_type):
     z_start, z_end = max(0, z_start+1), min(mask_scan.shape[2], z_end-1)
 
     liver_mask   = mask_scan[x_start:x_end, y_start:y_end, z_start:z_end]
-
-
     liver_mask = get_tumor(liver_mask, tumor_type)
     mask_scan[x_start:x_end, y_start:y_end, z_start:z_end] = liver_mask
     return mask_scan
@@ -365,6 +373,107 @@ def syn(out="/ailab/user/dailinrui/data/datasets/compr_syntumor"):
         tumor_scan = SynthesisTumor(mask_scan, tumor_types[random.randint(0, len(tumor_types)-1)])
         sitk.WriteImage(sitk.GetImageFromArray((tumor_scan == 2).astype(np.uint8)), os.path.join(out, f"case_{i:04d}.nii.gz"))
         
+        
+def lesion_syn(inputs="/ailab/user/dailinrui/code/latentdiffusion/helpers/template_organ/image",
+               outputs="/ailab/user/dailinrui/data/datasets/compr_lesion/"):
+    import torchio as tio
+    from itertools import cycle
+    from scipy.ndimage import label
+    from ldm.data.utils import TorchioForegroundCropper
+    def load(path):
+        im = sitk.ReadImage(path)
+        arr = sitk.GetArrayFromImage(im)
+        return im, arr
+    
+    def add_version(olds, new, is_file=False, suffix='.nii.gz'):
+        if is_file:
+            # olds: os.listdir, new: os.path.abspath
+            basename = os.path.basename(new)
+            dirname = os.path.dirname(new)
+            mtime = [(file, os.path.getmtime(os.path.join(dirname, file))) for file in olds if file.startswith(basename.split('.')[0])]
+            if len(mtime) == 0: maxtime = 0
+            else:
+                max_time_file = max(mtime, key=lambda x: x[1])[0]
+                if 'version' in max_time_file: 
+                    maxtime = int(max_time_file.split(suffix)[0][max_time_file.find('version') + len("version"):])
+                else: maxtime = 0
+            new = os.path.join(dirname, basename.split(suffix)[0] + f"_version{maxtime + 1}" + suffix)
+        else:
+            mpath = [(x, int(x.split(suffix)[0][x.find('version') + len('version'):]) if 'version' in x else 0) for x in olds if x.startswith(new.split('.')[0])]
+            max_version = max(mpath, key=lambda x: x[1])[1]
+            new = new.split(suffix)[0] + f'_version{max_version + 1}' + suffix
+        return new
+    
+    inputs = Path(inputs)
+    outputs = Path(outputs)
+    os.makedirs(outputs, exist_ok=1)
+    parser = LabelParser("v1")
+    cropper = TorchioForegroundCropper(crop_level='patch',
+                                       crop_anchor='tumorseg',
+                                       output_size=(280, 280, 280),
+                                       foreground_prob=1.,
+                                       pad_value=lambda x: x['image'].min())
+    tumor_types = ["tiny", "small", "medium", "large", "mix"]
+    ds_names = ["colon"]  # ["liver", "stomach", "kidney", "gallbladder", "esophagus", "pancreas", "urinarybladder"]
+    for ds in inputs.glob("*.txt"):
+        base = Path(outputs) / ds.name.split('.')[0]
+        if base.name not in ds_names: continue
+        os.makedirs(base / "image", exist_ok=1)
+        os.makedirs(base / "totalseg", exist_ok=1)
+        os.makedirs(base / "tumorseg", exist_ok=1)
+        with open(ds) as f, open(ds.parent.parent / "totalseg" / ds.name) as g:
+            scans = [_.strip() for _ in f.readlines()]
+            scan_totalsegs = [_.strip() for _ in g.readlines()]
+            
+        obj = {}
+        itr = 1024
+        for scan, scan_totalseg in tqdm(cycle(zip(scans, scan_totalsegs)), total=1000, desc=f"generate {ds.name.split('.')[0]} mask"):
+            path_to_image = Path(scan)
+            path_to_totalseg = Path(scan_totalseg)
+            if not path_to_totalseg.exists(): 
+                print(f"path {path_to_totalseg} does not exist")
+                continue
+            
+            anchor, image = load(path_to_image)
+            anchor, totalseg = load(path_to_totalseg)
+            partial_totalseg = parser.totalseg2mask(totalseg, [OrganTypeBase(name=ds.name.split('.')[0], label=1)])
+            if partial_totalseg.sum() == 0:
+                print(f"{path_to_totalseg} has no foreground")
+                continue
+            
+            tumor_mask = SynthesisTumor(partial_totalseg, tumor_types[random.randint(0, len(tumor_types)-1)])
+            # tumor_mask_tumor, _ = label(tumor_mask == 2)
+            # tumor_mask_bincount = np.bincount(tumor_mask_tumor.flatten())[1:]
+            subject = tio.Subject(
+                image=tio.ScalarImage(tensor=image.astype(np.float32)[None]),
+                totalseg=tio.ScalarImage(tensor=totalseg.astype(np.float32)[None]),
+                tumorseg=tio.ScalarImage(tensor=tumor_mask.astype(np.float32)[None]),
+                anchor=tio.ScalarImage(tensor=(tumor_mask == 2).astype(np.float32)[None])
+            )
+            subject = cropper(subject)
+            # assert subject.image.data.shape == (1, 280, 280, 280) and subject.tumorseg.data.max() == 2, f"{subject.image.data.shape}, {subject.tumorseg.data.max()}"
+            assert subject.image.data.shape == (1, 280, 280, 280), f"shape {subject.image.data.shape}"
+            if subject.tumorseg.data.max() == 1: 
+                print("not cropping tumor foreground")
+                continue
+            
+            sample = {k: sitk.GetImageFromArray(getattr(subject, k).data[0]) for k in ['image', 'totalseg', 'tumorseg']}
+            for k, v in sample.items():
+                sample[k].SetOrigin(anchor.GetOrigin())
+                sample[k].SetDirection(anchor.GetDirection())
+                sample[k].SetSpacing(anchor.GetSpacing())
+
+            for k, v in sample.items(): sitk.WriteImage(v, base / k / f"{itr:05d}.nii.gz")
+            obj[str(path_to_image)] = {k: str(base / k / f"{itr:05d}.nii.gz") for k in sample.keys()} |\
+                {"raw_image": str(path_to_image), "raw_totalseg": str(path_to_totalseg)}
+            
+            itr -= 1
+            if itr < 0: break
+            
+        with open(inputs / f"syntumor_{base.name}.json", 'w') as f:
+            json.dump(obj, f, indent=4)
+        
 
 if __name__ == '__main__':
-    syn()
+    # syn()
+    lesion_syn()

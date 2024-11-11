@@ -25,7 +25,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/latent-diffusion/brats2021_cfldm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug", "--precision", "32"],
+            "args": ["-b", "./configs/latent-diffusion/brats21_ldm_128_128_128_cfldm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug", "--precision", "32"],
             "console": "integratedTerminal"
         },
         {
@@ -41,7 +41,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/latent-diffusion/brats2021_cfldm.yaml", "--gpus", "0,", "--name", "test", "--debug", "--precision", "16"],
+            "args": ["-b", "./configs/latent-diffusion/brats21_ldm_128_128_128_cfldm.yaml", "--gpus", "0,", "--name", "test", "--debug", "--precision", "32"],
             "console": "integratedTerminal"
         },
         {
