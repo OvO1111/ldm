@@ -125,8 +125,12 @@ class NetLinLayer(nn.Module):
 class vgg16(torch.nn.Module):
     def __init__(self, requires_grad=False, pretrained=True):
         super(vgg16, self).__init__()
-        vgg_pretrained_model = models.vgg16(pretrained=False)
-        vgg_pretrained_model.load_state_dict(torch.load("./dependency/vgg16-397923af.pth", map_location="cpu"))
+        model_path = "./dependency/vgg16-397923af.pth"
+        if os.path.exists(model_path):
+            vgg_pretrained_model = models.vgg16(pretrained=False)
+            vgg_pretrained_model.load_state_dict(torch.load(model_path, map_location="cpu"))
+        else:
+            vgg_pretrained_model = models.vgg16(pretrained=True)
         vgg_pretrained_features = vgg_pretrained_model.features
         self.slice1 = torch.nn.Sequential()
         self.slice2 = torch.nn.Sequential()
