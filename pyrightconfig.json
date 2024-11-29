@@ -1,8 +1,0 @@
-{
-    "include": [
-        "ldm/**/*.py",
-        "configs/**/*.yaml",
-        "inference/**/*.py",
-        "./*.py"
-    ]
-}

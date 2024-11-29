@@ -374,9 +374,9 @@ class DDPM(pl.LightningModule):
 
     def get_input(self, batch, k):
         # maybe unwrap torchio
-        if isinstance(batch, tio.Subject):
-            x = getattr(batch, k, batch[k])
-        else: x = batch[k]
+        x = batch[k]
+        if isinstance(x, dict) and 'data' in x:
+            x = x['data']
         if isinstance(x, torch.Tensor):
             x = x.to(memory_format=torch.contiguous_format, dtype=self.dtype).to(self.device)
         return x

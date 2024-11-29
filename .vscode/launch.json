@@ -25,7 +25,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/latent-diffusion/brats21_ldm_128_128_128_cfldm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug", "--precision", "32"],
+            "args": ["-b", "./configs/latent-diffusion/difftumor_128_128_128_ldm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug", "--precision", "32"],
             "console": "integratedTerminal"
         },
         {
