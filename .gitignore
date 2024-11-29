@@ -15,21 +15,4 @@ __pycache__
 execute.sh
 helpers/
 
-configs/latent-diffusion/brats*
-configs/latent-diffusion/ruijin*
-configs/latent-diffusion/ensemble*
-configs/latent-diffusion/cdm*
-configs/latent-diffusion/medsyn*
-configs/downstream
-configs/clip
-configs/classifier
-configs/autoencoder/brats*
-configs/autoencoder/ruijin*
-configs/categorical-diffusion/ruijin*
-configs/categorical-diffusion/ensemble*
-
-ldm/modules/vision_mamba.py
-inference/fvd.py
-inference/metric_cal.py
-
 *.json

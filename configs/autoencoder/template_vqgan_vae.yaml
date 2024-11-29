@@ -1,20 +1,20 @@
 model:
-  base_learning_rate: 1e-4
-  target: ldm.models.autoencoder.VQModel
+  base_learning_rate: 2e-5
+  train_target: ldm.models.autoencoder.VQModel
+  test_target: inference.models.InferAutoencoderVQ
   params:
     monitor: "val/rec_loss"
-    image_key: mask
+    image_key: $key
     embed_dim: 8
     n_embed: 8192
     dims: 3
-    use_window_norm: false  
     lossconfig:
       target: ldm.modules.losses.VQLPIPSWithDiscriminator
       params:
         disc_start: 20001
         disc_weight: 0.5
         n_classes: 8192  # =n_embed
-        gan_feat_weight: 0.
+        gan_feat_weight: 1.
         nframes_select: 1  # 1 as in medicaldiffusion
 
     ddconfig:
@@ -23,8 +23,8 @@ model:
       resolution: [128, 128, 128]
       in_channels: 1
       out_ch: 1
-      ch: 32
-      ch_mult: [ 1, 1, 1 ]  # num_down = len(ch_mult)-1
+      ch: 128
+      ch_mult: [ 1, 1, 1 ]  
       num_res_blocks: 2
       attn_resolutions: []
       dropout: 0.0
@@ -34,46 +34,50 @@ model:
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 3
-    num_workers: 8
+    batch_size: 1
+    num_workers: 2
     wrap: False
     train:
-      target: ldm.data.ensemble_v2.GatheredDatasetForGeneration
+      target: ldm.data.base.SimpleDataset
       params:
         split: train
-        resize_to: [128, 128, 128]
+        patch_size: [128, 128, 128]
+        any_dict: 
+          image: $path
+          label: $path
     validation:
-      target: ldm.data.ensemble_v2.GatheredDatasetForGeneration
+      target: ldm.data.base.SimpleDataset
       params:
         split: val
-        resize_to: [128, 128, 128]
+        patch_size: [128, 128, 128]
         max_size: 200
+    test:
+      target: ldm.data.base.SimpleDataset
+      params:
+        split: test
+        patch_size: [128, 128, 128]
 
 lightning:
   callbacks:
     image_logger:
       target: main.ImageLogger
-      max_images: 10
-      log_separate: false
       params:
-        train_batch_frequency: 400
-        val_batch_frequency: 50
-        max_images: 8
+        train_batch_frequency: 200
+        max_images: 10
+        log_images_kwargs: 
+          ddim_steps: 50
         logger:
           inputs: 
-            target: mask_rescale
-            params:
-              n_mask: 2
+            target: image_rescale
+          conditioning:
+            target: image_rescale
           reconstruction:
-            target: mask_rescale
-            params:
-              n_mask: 2
+            target: image_rescale
           samples:
-            target: mask_rescale
-            params:
-              n_mask: 2
+            target: image_rescale
 
   trainer:
-    benchmark: True
+    benchmark: true
     accumulate_grad_batches: 1
+    limit_test_batches: 100
 

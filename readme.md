@@ -1,80 +1,59 @@
 3D version of "High-Resolution Image Synthesis with Latent Diffusion Models" or "Stable Diffusion"
+- prepare env:
+`conda env create -f environment.yml`
+- train command:
+`torchrun --nproc-per-node=<ngpus> main.py --base <config file path> -t --name <experiment name>`
+- test command:
+`python main.py --base <config file path> --name <experiment name>`, which should be just the train command minus `-t` flag
 
-# Train command
-`torchrun --nproc_per_node $N_GPU main.py --base $CFG_FILE -t --name $EXP_NAME --gpus 0,1...`
+ before train/inference process, compile a config file, which consists of three major parts: `model`, `data` and other lightning-related modules.
 
-## Stage -1: prepare environment
+ Firstly, in `model`, there is
 ```
-# fork this repository to your github
-git clone $GIT_ADDR_TO_YOUR_REPO ./latentdiffusion
-cd ./diffusion
-pip install -r requirements.txt
+base_learning_rate: 1.5e-4    
 ```
+specifying the BASE learning rate for training model, which may be changed by pytorch-lightning  following specific batch size and GPU number of choice
+```
+train_target: TARGET_TRAIN
+test_target:  TARGET_TEST
+params:       **PARAM_DICT
+```
+where each target name should be the module import path relative to the root directory (`./`), *e.g.* a train target of `ldm.models.ldm.ddpm.DDPM` will instantiate `DDPM` module in `./ldm/models/ldm/ddpm.py` for training. Pass the parameters in the params part in a key: value format
+```
+test_only_params: **PARAM_DICT
+```
+this param dict is used to assign extra parameters in the TARGET_TEST module (which should inherit the TRAIN_TARGET), mostly the checkpoint path to trained model and others related to saving the generated images
 
-## Stage 0: write config file
-config files resides under `configs/`
+Secondly, in `data`, there generally is not much to change and the parameters should be self-explanatory
 ```
-# instantiate training module
-model:
-  train_target: ldm.models.ddpm.LatentDiffusion
-  test_target: inference.models.InferLatentDiffusion
-  test_only_params:
-    save_dataset: true
-    save_dataset_path: ...
-    suffix_keys: 
-      samples: .nii.gz
-  params:
+target: main.DataModuleFromConfig
+params:
+  batch_size: $bs
+  num_workers: $nw
+  train: 
+    target: ldm.data.base.SimpleDataset
+    params: **PARAM_DICT
+  validation:
     ...
-
-# instantiate dataset
-data:
-  target: main.DataModuleFromConfig
-  params:
-    batch_size: 1
-    train:
-      target: ldm.data.brats2021.BraTS2021_3D
-      params:
-        split: train
-        ...
-
-# instantiate lightning logger
-lightning:
-  callbacks:
-    image_logger:
-      target: main.ImageLogger
-      params:
-        train_batch_frequency: 200
-        max_images: 20
-
-# instantiate trainer
-trainer:
-  benchmark: true
-  max_epochs: 1000
-  limit_test_batches: 100
-  resume_from_checkpoint: null
+  test:
+    ...
 ```
+which uses the module `SimpleDataset` in `./ldm/data/base.py`, a wrapper class of `CacheDataset` from `monai`
 
-## Stage 1: train autoencoder
- ##### For training autoencoder using KL regularization, the code workflow is: 
-- `main.py` ( trainer function ) -> 
-- `ldm/models/autoencoder.py` ( autoencoder wrapper ) -> 
-- `ldm/modules/losses/contperceptual.py` ( LPIPS and GAN loss ) & `ldm/modules/diffusionmodules/model.py` ( autoencoder model class )
+Finally, you can pass whatever arguments supported by pytorch-lightning trainer either as command flags or in the `trainer` section of the config file
+```
+accumulate_grad_batches: 1
+```
+specifies that pl should accumulate model gradient per batch
+```
+max_epochs: 500
+```
+specifies that the training process lasts for 500 epochs. 
+```
+limit_test_batches: 100
+```
+Remember to add this line to force the number (100 here) of samples generated at inference. Demo config files can be found under `config/` folder
 
- ##### For training autoencoder using Vector Quantization, the code workflow is: 
- - `main.py` ( trainer function ) -> 
-- `ldm/models/autoencoder.py` ( autoencoder wrapper ) -> 
-- `ldm/modules/losses/vqperceptual.py` ( LPIPS and codebook loss ) & `ldm/modules/diffusionmodules/model.py` ( autoencoder model class )
-
-## Stage 2: train diffusion model
-##### For training latentdiffusion model, the code workflow is:
-- `main.py` ( trainer function ) -> 
-- `ldm/models/diffusion/ddpm.py` ( diffusion wrapper ) ->
-- `ldm/modules/diffusionmodules/openaimodel.py` ( diffusion UNet )
-- `ldm/models/diffusion/ddim.py` is for fast reverse sampling using DDIM
-
-# Inference command
-`python main.py --base $CFG_FILE --name $EXP_NAME --gpus 0,` 
-- CFG_FILE is specified like that in training cmd
 
 # References
 Refer to the following directories for more details

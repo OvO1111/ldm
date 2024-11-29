@@ -1,360 +1,148 @@
-from abc import abstractmethod
-from torch.utils.data import Dataset, IterableDataset
+import h5py, numpy as np
 
-import os
-import h5py
-import json
-import torch
-import random
-import SimpleITK as sitk
-import torchio as tio, nibabel as nib, numpy as np
-from functools import partial
-from ldm.data.utils import TorchioForegroundCropper, TorchioBaseResizer, \
-    load_or_write_split, identity, window_norm
+import json, torch
+from functools import reduce
+from omegaconf.omegaconf import DictConfig, ListConfig
+from monai.transforms import (
+    AsDiscrete,
+    EnsureChannelFirstd,
+    Compose,
+    CropForegroundd,
+    LoadImaged,
+    Orientationd,
+    RandFlipd,
+    RandCropByPosNegLabeld,
+    RandShiftIntensityd,
+    ScaleIntensityRanged,
+    Spacingd,
+    RandRotate90d,
+    ToTensord,
+    CenterSpatialCropd,
+    Resized,
+    SpatialPadd,
+    apply_transform,
+    RandZoomd,
+    RandCropByLabelClassesd,
+)
+
+from monai.data.dataset import CacheDataset
+from data.utils import LabelParser, OrganTypeBase
+from torch.utils.data import default_collate, Dataset
 
 
-class GenDatasetForEnsemble(Dataset):
-    def __init__(self, include_case=None, resize_to=(128, 128, 128), max_size=None, **kw):
+def read_text(path, process_fn=lambda x: x):
+    if path.endswith('json'):
+        with open(path) as f:
+            text = json.load(f)
+    elif reduce(lambda x, y: x | y, [path.endswith(x) for x in ['txt', 'list', 'out']]):
+        with open(path) as f:
+            text = "\n".join(f.readlines()).strip()
+    return process_fn(text)
+
+
+class SimpleDataset:
+    def __init__(self, train_dict=None, val_dict=None, test_dict=None, any_dict=None,
+                 split='train', output_keys=['image', 'label'], image_keys=['image'], label_keys=['label'], 
+                 max_size=None, use_aug=False, cache_num=0, patch_size=[128, 128, 128], **kw):
+        """
+        makes a dataset dict from
+        image: [$path1, $path2, ...]
+        label: [$path1, $path2, ...]
+        """
+        self.train_dict = train_dict
+        self.val_dict = val_dict
+        self.test_dict = test_dict
+        if self.train_dict is None and self.val_dict is None and self.test_dict is None:
+            assert any_dict is not None, "at least give it one list to work with"
+            self.__dict__[f"{split}_dict"] = any_dict
+        
+        self.split = split
+        self.use_aug = use_aug
+        self.patch_size = patch_size
+        self.output_keys = output_keys
+        assert split in ['train', 'val', 'test']
+        if isinstance(self.__dict__[f"{split}_dict"], (dict, DictConfig)):
+            _dict = {}
+            for k, v in self.__dict__[f"{split}_dict"].items():
+                with open(v) as f:
+                    _dict[k] = [_.strip() for _ in f.readlines()]
+            self.__dict__[f"{split}_dict"] = _dict
+        else:
+            with open(v) as f:
+                self.__dict__[f"{split}_dict"] = json.load(self.__dict__[f"{split}_dict"])
+        
+        self.split_list = []
+        if len(image_keys) == 0: 
+            image_keys = [key for key in self.output_keys if 'image' in key or 'img' in key]
+        if len(label_keys) == 0:
+            label_keys = [key for key in self.output_keys if 'label' in key or 'seg' in key or 'mask' in key]
+        for args in zip(*self.__dict__[f"{split}_dict"].values()):
+            self.split_list.append({ik: iv if ik in image_keys + label_keys else read_text(iv)} for ik, iv in zip(self.__dict__[f"{split}_dict"].keys(), args))
+            
+        assert reduce(lambda x, y: x | y, [x in self.__dict__[f"{split}_dict"] for x in output_keys])
+        
+        if max_size is not None:     
+            self.__dict__[f"{split}_dict"] = {k: v for ikv, (k, v) in enumerate(self.__dict__[f"{split}_dict"], 1) if ikv <= max_size}
+        preprocess = self.get_preprocess(image_keys, label_keys, **kw)
+        
+        self.parser = LabelParser(totalseg_version="v1")
+        self.dataset = CacheDataset(self.__dict__[f"{split}_keys"], transform=preprocess, cache_num=cache_num, num_workers=1)
+        
+    def get_preprocess(self, image_keys, label_keys, **kw):
+        if not isinstance(image_keys, (list, ListConfig)): image_keys = [image_keys]
+        if not isinstance(label_keys,  (list, ListConfig)): label_keys = [label_keys]
+        transforms = []
+        transforms.extend([
+            LoadImaged(keys=image_keys + label_keys),
+            EnsureChannelFirstd(keys=image_keys + label_keys, channel_dim="no_channel"),
+            Orientationd(keys=image_keys + label_keys, axcodes="RAS"),
+            Spacingd(keys=image_keys + label_keys, pixdim=[1, 1, 1],
+                     mode=["bilinear" if key in image_keys else "nearest" for key in image_keys + label_keys]),
+            SpatialPadd(keys=image_keys + label_keys, spatial_size=self.patch_size, mode='constant'),
+            CropForegroundd(keys=image_keys + label_keys, source=kw.get("crop_by_fg_key", image_keys[0])),
+            ScaleIntensityRanged(keys=image_keys, a_min=kw.get('window_min', -1000), a_max=kw.get('window_max', 1000), b_min=-1, b_max=1)
+        ])
+        if self.split == "train" and self.use_aug:
+            transforms.extend([
+                RandRotate90d(keys=image_keys + label_keys, prob=0.10, max_k=3),
+                RandShiftIntensityd(keys=image_keys, offsets=0.1, prob=0.2),
+                RandZoomd(keys=label_keys + image_keys, prob=0.1),
+                RandFlipd(keys=image_keys + label_keys, prob=0.1)
+            ])
+        elif self.split == "train":
+            transforms.append(
+                RandCropByPosNegLabeld(keys=image_keys + label_keys, label_key=kw.get("crop_by_label_key", label_keys[0]),
+                                       spatial_size=self.patch_size, pos=kw.get("crop_by_label_seqclass", [2])[-1], neg=kw.get("crop_by_label_seqclass", [1])[0])
+            )
+        else:
+            transforms.append(
+                RandCropByLabelClassesd(keys=image_keys + label_keys, label_key=kw.get("crop_by_label_key", label_keys[0]),
+                                        spatial_size=self.patch_size, ratios=kw.get("crop_by_label_seqclass", [0, 1]), num_classes=kw.get("crop_by_label_nclass", 2)),
+            )
+        transforms.append(ToTensord(keys=image_keys + label_keys))
+        return Compose(transforms)
+        
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        sample = self.dataset[idx]
+        trunc_sample = {k: v for k, v in sample.items() if k in self.output_keys}
+        return trunc_sample
+    
+    def collate(self, batch):
+        return default_collate(batch)
+    
+
+
+class DummyDataset(Dataset):
+    def __init__(self, **kw):
         super().__init__()
-        totalseg_gen = "/ailab/user/dailinrui/data/ccdm_pl/ensemblev2_128_128_128_anatomical/dataset/samples"
-        tumorseg_gen = "/ailab/user/dailinrui/data/datasets/ensemble/val/"
-        mapping = "/ailab/user/dailinrui/data/datasets/ensemble/mapping.json"
-        with open(mapping) as f:
-            self.mapping = {v: k for k, v in json.load(f).items()}
-            
-        if include_case is None:
-            include_case = [_ for _ in os.listdir(totalseg_gen)]
-            random.shuffle(include_case)
-        
-        self.keys = [{"totalseg": os.path.join(totalseg_gen, case), 
-                      "tumorseg": os.path.join(tumorseg_gen, self.mapping[case.replace('.nii.gz', '.h5')])} for case in include_case][:max_size]
-        
-        self.transforms = dict(
-            resize=tio.Resize(resize_to) if resize_to is not None else tio.Lambda(identity),
-            crop=TorchioForegroundCropper(crop_level="mask_foreground", 
-                                          crop_anchor="totalseg",
-                                          crop_kwargs=dict(outline=(10, 10, 10))) if resize_to is not None else tio.Lambda(identity),
-        )
-        
-    def __len__(self):
-        return len(self.keys)
-    
-    def load_nifti(self, x):
-        return sitk.GetArrayFromImage(sitk.ReadImage(x))
-    
-    def __getitem__(self, idx):
-        item = self.keys[idx]
-        totalseg = self.load_nifti(item['totalseg'])
-        sample = h5py.File(item['tumorseg'])
-        attrs = sample.attrs
-        ds = {k: sample[k][:] for k in sample.keys()}
-        ds['prompt_context'] = ds["prompt_context"][0]
-        image = np.zeros_like(totalseg)
-        spacing = (1, 1, 1)
-        
-        subject = tio.Subject(image=tio.ScalarImage(tensor=ds['image'], spacing=spacing), 
-                              totalseg=tio.LabelMap(tensor=ds['totalseg'], spacing=spacing,),
-                              mask=tio.LabelMap(tensor=(ds['mask'] == 2).astype(np.float32) if ds['mask'].max() > 1 else ds['mask'], spacing=spacing))
-        
-        # resize based on spacing
-        ori_size = subject.image.data.shape
-        # crop
-        subject = self.transforms["crop"](subject)
-        # resize
-        subject = self.transforms["resize"](subject)
-        # random aug
-        subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
-        
-        sample = dict(**attrs) | ds
-        sample.update({k: getattr(subject, k).data for k in subject.keys()})
-        sample['totalseg'] = torch.tensor(totalseg[None])
-        sample.update({"cond": torch.cat([sample['totalseg'], sample['mask']], dim=0)})
-        return sample
-    
-    
-class GenDatasetForMSD(Dataset):
-    def __init__(self, 
-                 base,
-                 resize_to=(128, 128, 128),
-                 max_size=None,
-                 gen_field="image",
-                 dummy_fields=[]):
-        self.data = [os.path.join(base, _) for _ in os.listdir(base)][:max_size]
-        self.gen_field = gen_field
-        self.dummy_fields = dummy_fields
-        self.transforms = dict(
-            resize=tio.Resize(resize_to) if resize_to is not None else tio.Lambda(identity),
-            normalize=tio.RescaleIntensity(in_min_max=(0, 3), out_min_max=(0, 1)),
-        )
-        
-    def __len__(self): return len(self.data)
-    
-    def read_nifti(self, x):
-        return sitk.GetArrayFromImage(sitk.ReadImage(x))
-    
-    def __getitem__(self, idx):
-        item = self.read_nifti(self.data[idx])[None]
-        dummy = np.zeros_like(item, dtype=np.float32).repeat(4, 0)
-        subject = tio.Subject(**({self.gen_field: tio.ScalarImage(tensor=item)} | {field: tio.ScalarImage(tensor=dummy) for field in self.dummy_fields}))
-        subject = self.transforms["resize"](subject)
-        subject = self.transforms["normalize"](subject)
-        # random aug
-        subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
-        sample = {k: getattr(subject, k).data for k in subject.keys()}
-        sample = sample | {"cond": torch.cat([sample[self.gen_field], (sample[self.gen_field] > 0).float()], dim=0)}
-        return sample
-    
-
-class MSDDataset(Dataset):
-    def __init__(self, name, base="/ailab/user/dailinrui/data/datasets", mapping={}, split="train", max_size=None, resize_to=(96,)*3, force_rewrite_split=False, info={}):
-        base_folder = os.path.join(base, name)
-        self.base_folder = base_folder
-        self.get_spacing = lambda x: sitk.ReadImage(x).GetSpacing()
-        if split == "test": split = "val"
-        self.transforms = dict(
-            resize_base=TorchioBaseResizer(),
-            resize=tio.Resize(resize_to) if resize_to is not None else tio.Lambda(identity),
-            crop=TorchioForegroundCropper(crop_level="patch", 
-                                          crop_anchor="image",
-                                          crop_kwargs=dict(output_size=resize_to)) if resize_to is not None else tio.Lambda(identity),
-            normalize_image=tio.Lambda(partial(window_norm, window_pos=-500, window_width=1800)),
-            normalize_mask=tio.RemapLabels(mapping, include=["mask"])
-        )
-
-        self.split = split
-        self.name = name
-        if not os.path.exists(f"{base_folder}/train.list") or force_rewrite_split:
-            train_val_cases = os.listdir(f"{base_folder}/imagesTr")
-            random.shuffle(train_val_cases)
-            train_cases = train_val_cases[:round(0.8 * len(train_val_cases))]
-            val_cases = train_val_cases[round(0.8 * len(train_val_cases)):]
-            test_cases = os.listdir(f"{base_folder}/imagesTs")
-            
-            for spt in ["train", "val", "test"]:
-                with open(f"{base_folder}/{spt}.list", "w") as fp:
-                    for c in locals().get(f"{spt}_cases"):
-                        fp.write(c + "\n")
-        
-        for spt in ["train", "val", "test"]:
-            with open(f"{base_folder}/{spt}.list") as fp:
-                self.__dict__[f"{spt}_keys"] = [_.strip() for _ in fp.readlines()]
-        else:
-            self.split_keys = getattr(self, f"{split}_keys")[:max_size]
-            
-        self.__dict__.update(info)
-        
-    @staticmethod                
-    def load_fn(p, return_spacing=0, transpose_code=None):
-        image = nib.load(p)
-        array = image.dataobj[:]
-        if transpose_code is None:
-            x, y, z = nib.aff2axcodes(image.affine)
-        else:
-            x, y, z = transpose_code
-        dims = [0, 1, 2]
-        for ianc, anc in enumerate([x, y, z]):
-            dims[0 if anc in ['S', 'I'] else 1 if anc in ['P', 'A'] else 2 if anc in ['L', 'R'] else 10] = ianc
-        array = array.transpose(*dims)
-        if "S" not in [x, y, z]: array = np.flip(array, axis=0)
-        if "P" not in [x, y, z]: array = np.flip(array, axis=1)
-        if "L" not in [x, y, z]: array = np.flip(array, axis=2)
-        array = array.copy()
-        if return_spacing:
-            return array, tuple(np.array(image.header.get_zooms())[dims].tolist()), [x, y, z]
-        return array
-        
-    def __len__(self):
-        return len(self.split_keys)
-            
-    def __getitem__(self, idx):
-        item = self.split_keys[idx] if isinstance(idx, int) else idx
-        
-        if self.split in ["train", "val"]:
-            image, spacing, code = self.load_fn(os.path.join(self.base_folder, "imagesTr", item), 1)
-            mask, totalseg = map(lambda x: self.load_fn(os.path.join(self.base_folder, x, item), transpose_code=code), ["labelsTr", "totalsegTr"])
-            subject = tio.Subject(image=tio.ScalarImage(tensor=image[None], spacing=spacing), 
-                                  mask=tio.LabelMap(tensor=mask[None], spacing=spacing),
-                                  totalseg=tio.LabelMap(tensor=totalseg[None], spacing=spacing))
-        if self.split == "test":
-            image, spacing = self.load_fn(os.path.join(self.base_folder, "imagesTs", item), 1)
-            subject = tio.Subject(image=tio.ScalarImage(tensor=image[None], spacing=spacing))
-        # resize based on spacing
-        ori_size = subject.image.data.shape
-        subject = self.transforms["resize_base"](subject)
-        # crop
-        subject = self.transforms["crop"](subject)
-        # normalize
-        subject = self.transforms["normalize_image"](subject)
-        subject = self.transforms["normalize_mask"](subject)
-        # resize
-        subject = self.transforms["resize"](subject)
-        # random aug
-        subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
-        subject = {k: v.data for k, v in subject.items()} | {'casename': self.split_keys[idx] if isinstance(idx, int) else idx, "ori_size": ori_size, "text": "", "attr": ""}
-
-        return subject
-    
-    
-class TCIADataset(Dataset):
-    def __init__(self, 
-                 ds_name,
-                 mapping={},
-                 split="train", 
-                 base="/ailab/public/pjlab-smarthealth03/dailinrui/guidegen",
-                 resize_to=(128, 128, 128)):
-        self.split = split
-        self.name = ds_name
-        super().__init__()
-        self.ds_base = os.path.join(base, self.name)
-        with open(os.path.join(self.ds_base, "dataset.json")) as f:
-            raw_ds = json.load(f)
-        
-        self.ds = {}
-        for pid, pitem in raw_ds.items():
-            for i in range(len(pitem['patient_best_ct'])):
-                image_path = pitem["patient_best_ct"][i].replace("/hdd3/share/nifti", "/ailab/public/pjlab-smarthealth03/dailinrui/guidegen")
-                if not image_path.endswith(".nii.gz"): continue
-                if image_path not in ["/ailab/public/pjlab-smarthealth03/dailinrui/guidegen/TCGA-LUAD/TCGA-LUAD_00056/608.000000-FUSED LUNG WINDOW-41697.nii.gz",
-                                      "/ailab/public/pjlab-smarthealth03/dailinrui/guidegen/TCGA-LUAD/TCGA-LUAD_00056/607.000000-FUSED PET CT-09507.nii.gz",
-                                      "/ailab/public/pjlab-smarthealth03/dailinrui/guidegen/TCGA-LIHC/TCGA-LIHC_00008/10.000000-AP_Routine  3.0  SPO  cor-13326.nii.gz"]:
-                    self.ds.update({f"{pid}_{i:04d}": {"image": image_path, "text": pitem['clinical_info']}})
-            
-        self.data_keys = list(self.ds.keys())
-        random.shuffle(self.data_keys)
-        self.train_keys = self.data_keys[:round(len(self.data_keys) * 0.8)]
-        # self.val_keys = self.data_keys[round(len(self.data_keys) * 0.7):round(len(self.data_keys) * 0.8)]
-        self.val_keys = self.test_keys = self.data_keys[round(len(self.data_keys) * 0.8):]
-        self.train_keys, self.val_keys, self.test_keys = load_or_write_split(self.ds_base,
-                                                                             force=False,
-                                                                             train=self.train_keys, 
-                                                                             val=self.val_keys, test=self.test_keys)
-        
-        self.transforms = dict(
-            resize_base=TorchioBaseResizer(),
-            resize=tio.Resize(resize_to) if resize_to is not None else tio.Lambda(identity),
-            crop=TorchioForegroundCropper(crop_level="image_foreground", 
-                                          crop_anchor="image",
-                                          crop_kwargs=dict(foreground_hu_lb=1e-3,
-                                                            foreground_mask_label=None,
-                                                            outline=(0, 0, 0))),
-            normalize_image=tio.RescaleIntensity(out_min_max=(0, 1), in_min_max=None, include=["image"]),
-            normalize_mask=tio.RemapLabels(mapping, include=["mask"])
-        )
-        self.split_keys = getattr(self, f"{split}_keys")
-        
-    @staticmethod                
-    def load_fn(p, return_spacing=0, transpose_code=None):
-        image = nib.load(p)
-        array = image.dataobj[:]
-        if transpose_code is None:
-            x, y, z = nib.aff2axcodes(image.affine)
-        else:
-            x, y, z = transpose_code
-        dims = [0, 1, 2]
-        for ianc, anc in enumerate([x, y, z]):
-            dims[0 if anc in ['S', 'I'] else 1 if anc in ['P', 'A'] else 2 if anc in ['L', 'R'] else 10] = ianc
-        array = array.transpose(*dims)
-        if "S" not in [x, y, z]: array = np.flip(array, axis=0)
-        if "P" not in [x, y, z]: array = np.flip(array, axis=1)
-        if "L" not in [x, y, z]: array = np.flip(array, axis=2)
-        array = array.copy()
-        if return_spacing:
-            return array, tuple(np.array(image.header.get_zooms())[dims].tolist()), [x, y, z]
-        return array
     
     def __len__(self):
-        return len(self.split_keys)
-
-    def __getitem__(self, idx):
-        item = self.split_keys[idx] if isinstance(idx, int) else idx
-        text = self.ds[item]["text"]
-        if not os.path.exists(self.ds[item]["image"]) and ':' in self.ds[item]["image"]:
-            self.ds[item]["image"] = self.ds[item]["image"].replace(":", "-")
-        image, spacing, code = self.load_fn(self.ds[item]["image"], return_spacing=1)
-        totalseg = self.load_fn(self.ds[item]["image"].replace(".nii.gz", "_totalseg.nii.gz"), transpose_code=code)
-        mask = self.load_fn(self.ds[item]["image"].replace(".nii.gz", "_tumorseg.nii.gz"), transpose_code=code)
-        subject = tio.Subject(image=tio.ScalarImage(tensor=image[None], spacing=spacing), 
-                              totalseg=tio.LabelMap(tensor=totalseg[None], spacing=spacing,),
-                              mask=tio.LabelMap(tensor=mask[None], spacing=spacing))
-        
-        # resize based on spacing
-        ori_size = subject.image.data.shape
-        subject = self.transforms["resize_base"](subject)
-        # crop
-        subject = self.transforms["crop"](subject)
-        # normalize
-        subject = self.transforms["normalize_image"](subject)
-        subject = self.transforms["normalize_mask"](subject)
-        # resize
-        subject = self.transforms["resize"](subject)
-        # random aug
-        subject = self.transforms.get("augmentation", tio.Lambda(identity))(subject)
-        subject = {k: v.data for k, v in subject.items()} | {'casename': self.split_keys[idx] if isinstance(idx, int) else idx, "ori_size": ori_size, "text": text["prompt"]}
-        subject = subject | {"attr": text}
-
-        return subject
+        return 100
     
-    
-class TemplateMSDDataset(Dataset):
-    def __init__(self, name, base="/ailab/user/dailinrui/data/datasets", mapping={}, split="train", max_size=None, resize_to=(96,)*3, force_rewrite_split=False, info={}):
-        base_folder = os.path.join(base, name)
-        self.base_folder = base_folder
-        if split == "test": split = "val"
-        self.transforms = dict(
-            crop=TorchioForegroundCropper(crop_level="patch", 
-                                          crop_anchor="image",
-                                          crop_kwargs=dict(output_size=resize_to)) if resize_to is not None else tio.Lambda(identity),
-            normalize_image=tio.Lambda(partial(window_norm, window_pos=60, window_width=360), include=['image']),
-            remap_mask=tio.RemapLabels(mapping, include=["mask"]) if len(mapping) > 0 else tio.Lambda(identity),
-            augmentation=tio.OneOf({tio.RandomAffine(translation=10): 0.75, tio.Lambda(identity): 0.25},)
-        )
-
-        self.split = split
-        self.name = name
-        if not os.path.exists(f"{base_folder}/train.list") or force_rewrite_split:
-            train_val_cases = os.listdir(f"{base_folder}/imagesTr")
-            random.shuffle(train_val_cases)
-            train_cases = train_val_cases[:round(0.8 * len(train_val_cases))]
-            val_cases = train_val_cases[round(0.8 * len(train_val_cases)):]
-            test_cases = os.listdir(f"{base_folder}/imagesTs")
-            
-            for spt in ["train", "val", "test"]:
-                with open(f"{base_folder}/{spt}.list", "w") as fp:
-                    for c in locals().get(f"{spt}_cases"):
-                        fp.write(c + "\n")
-        
-        for spt in ["train", "val", "test"]:
-            with open(f"{base_folder}/{spt}.list") as fp:
-                self.__dict__[f"{spt}_keys"] = [_.strip() for _ in fp.readlines()]
-        else:
-            self.split_keys = getattr(self, f"{split}_keys")[:max_size]
-            
-        self.__dict__.update(info)
-        
-    @staticmethod                
-    def load_fn(p):
-        return sitk.GetArrayFromImage(sitk.ReadImage(p))
-        
-    def __len__(self):
-        return len(self.split_keys)
-            
-    def __getitem__(self, idx):
-        item = self.split_keys[idx] if isinstance(idx, int) else idx
-        
-        if self.split in ["train", "val"]:
-            image, mask = map(lambda x: self.load_fn(os.path.join(self.base_folder, x, item)), ["imagesTr", "labelsTr"])
-            subject = tio.Subject(image=tio.ScalarImage(tensor=image[None]), 
-                                  mask=tio.LabelMap(tensor=mask[None]),)
-        if self.split == "test":
-            image = self.load_fn(os.path.join(self.base_folder, "imagesTs", item))
-            subject = tio.Subject(image=tio.ScalarImage(tensor=image[None]))
-        # crop
-        subject = self.transforms["crop"](subject)
-        # normalize
-        subject = self.transforms["normalize_image"](subject)
-        subject = self.transforms["remap_mask"](subject)
-        # random aug
-        subject = self.transforms.get("augmentation", lambda x: x)(subject)
-        subject = {k: v.data for k, v in subject.items()} | {'casename': self.split_keys[idx] if isinstance(idx, int) else idx}
-
-        return subject
+    def __getitem__(self):
+        return {"image": torch.randn((96, 96, 96)).float(),
+                "label": torch.ones((96, 96, 96)).long(),
+                "text": "this is a dummy dataset"}

@@ -13,14 +13,13 @@ model:
     cond_stage_key: label
     conditioning_key: concat
     image_size: [64, 64, 64]  # after first-stage encoding
-    channels: 4  # after first-stage encoding
+    channels: 4               # after first-stage encoding
     monitor: val/loss_simple_ema
     cond_stage_trainable: false
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
       params:
-        image_size: 64  # not used
         in_channels: 5
         out_channels: 4
         model_channels: 128
@@ -31,32 +30,23 @@ model:
         use_checkpoint: true  # always use ckpt
 
     first_stage_config:
-      target: ldm.modules.diffusionmodules.model_lesiondiff.LesionDiffusionVQModelInterface
-      params:
-        monitor: "val/rec_loss"
-        image_key: image
-        embed_dim: 4
-        n_embed: 2048
+      # no loss needed
+      lossconfig:
+        target: nn.Identity
+      # copy the following from vq model
+      ddconfig:
+        double_z: false
+        z_channels: 8
+        resolution: [128, 128, 128]
+        in_channels: 1
+        out_ch: 1
+        ch: 128
+        ch_mult: [ 1, 1, 1 ]  
+        num_res_blocks: 2
+        attn_resolutions: []
+        dropout: 0.0
         dims: 3
-        is_conditional: false
-        ckpt_path: /ailab/public/pjlab-smarthealth03/leiwenhui/thr/code/lesionedition/vq2048/checkpoints/last.ckpt
-        lossconfig:
-          target: torch.nn.Identity
-
-        ddconfig:
-          double_z: False
-          z_channels: 4
-          resolution: [96, 96, 96]
-          in_channels: 1
-          out_ch: 1
-          ch: 96
-          ch_mult: [ 1, 1 ,1 ]  # num_down = len(ch_mult)-1 
-          sample_depth: [ 0 ] # specific layer depth for up and down sampling
-          num_res_blocks: 2
-          attn_resolutions: []
-          dropout: 0.0
-          dims: 3
-          attn_type: none
+        attn_type: none
 
     cond_stage_config: 
       target: ldm.modules.encoders.modules.ResizeConditionEncoder
@@ -66,37 +56,35 @@ model:
         resize_mode: nearest
 
   test_only_params:
+    ckpt_path: $path
     save_dataset: true 
-    save_dataset_path: /ailab/user/dailinrui/data/ldm/difftumor/${dataset_name}/dataset_v3
+    save_dataset_path: $path
     suffix_keys: 
       samples: .nii.gz
       mask: .nii.gz
-    ckpt_path: /ailab/user/dailinrui/data/ldm/difftumor/${dataset_name}/checkpoints/last.ckpt
 
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 1  # train batch size, test is default to test_batch_size=1
-    num_workers: 0
+    batch_size: 1
+    num_workers: 2
     wrap: False
     train:
-      target: ldm.data.difftumor.TorchioDataloader
+      target: ldm.data.base.SimpleDataset
       params:
-        iter_num: null
-        crop_shape: [128, 128, 128]
-        dataset_name: gallbladder_tumor
+        split: train
+        patch_size: [128, 128, 128]
     validation:
-      target: ldm.data.difftumor.TorchioDataloader
+      target: ldm.data.base.SimpleDataset
       params:
-        iter_num: 10
-        crop_shape: [128, 128, 128]
-        dataset_name: gallbladder_tumor
+        split: val
+        patch_size: [128, 128, 128]
+        max_size: 50
     test:
-      target: ldm.data.difftumor.TorchioDataloader
+      target: ldm.data.base.SimpleDataset
       params:
-        iter_num: null
-        crop_shape: [128, 128, 128]
-        dataset_name: gallbladder_tumor
+        split: test
+        patch_size: [128, 128, 128]
 
 lightning:
   callbacks:

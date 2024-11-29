@@ -105,17 +105,17 @@ class CategoricalDiffusion(pl.LightningModule):
                  num_classes=4,
                  mask_key="mask",
                  concat_key=None,
-                 timesteps=1000,
                  crossattn_key='context',
+                 conditioning_key='hybrid',
                  concat_encoder_config=None,
                  crossattn_encoder_config=None,
+                 cond_stage_trainable=False,
+                 timesteps=1000,
                  schedule='cosine',
                  step_T_sample='majority',
                  monitor="val/loss",
                  foreground_weight=1,
                  ckpt_path=None,
-                 conditioning_key='hybrid',
-                 cond_stage_trainable=False,
                  dims=3,
                  linear_start=.0001,
                  linear_end=.02,
@@ -135,6 +135,8 @@ class CategoricalDiffusion(pl.LightningModule):
         
         self.num_classes = num_classes
         self.cond_stage_trainable = cond_stage_trainable
+        
+        unet_config['params']['dims'] = dims
         self.model = DiffusionWrapper(unet_config, conditioning_key)
         self.monitor = monitor
         self.foreground_weight = foreground_weight
@@ -359,63 +361,6 @@ class CategoricalDiffusion(pl.LightningModule):
             return logs
         else:
             eps = self.get_noise(x0)
-            x0pred = self.denoising(eps, init_t=init_t, end_t=end_t, conditions=conditions, verbose=verbose)
-            
-            logs["inputs"] = x0.argmax(1)
-            logs["noise"] = eps.argmax(1)
-            logs["samples"] = x0pred.argmax(1)
-            
-            return logs
-        
-
-class CategoricalDiffusionV2(CategoricalDiffusion):
-    def __init__(self, **kw):
-        super().__init__(**kw)
-        
-    def get_loss(self, x, y):
-        return torch.nn.functional.cross_entropy(x, y)
-        
-    def shared_step(self, batch):
-        mask_x0 = self.get_input(batch, self.mask_key)
-        conditions = {"c_crossattn": self.get_input(batch, self.crossattn_key),
-                      "c_concat": self.get_input(batch, self.concat_key)}
-        b = mask_x0.shape[0]
-        if self.training:
-            loss_prefix = "train"
-            t = torch.multinomial(torch.arange(self.timesteps, device=mask_x0.device) ** 1.5, b)
-        else:
-            loss_prefix = "val"
-            t = torch.full((b,), fill_value=self.timesteps-1, device=mask_x0.device)
-        mask_xt = self.q_xt_given_x0(mask_x0, t, noise=self.get_noise(mask_x0)).sample()
-            
-        mask_x0pred = self.model(mask_xt, t, **conditions)
-        debug = mask_x0pred.argmax(1).max()
-        loss = self.get_loss(mask_x0pred, mask_x0.float())
-        loss_dict = {f"{loss_prefix}/ce": loss, f"{loss_prefix}/debug": debug}
-        return loss, loss_dict
-    
-    def log_images(self, batch, split="train", init_t=None, end_t=0, verbose=False):
-        logs = {}
-        x0 = self.get_input(batch, self.mask_key)
-        conditions = {"c_crossattn": self.get_input(batch, self.crossattn_key),
-                      "c_concat": self.get_input(batch, self.concat_key)}
-        b = x0.shape[0]
-        if 'c_concat' in conditions and self.concat_key is not None:
-            logs['conditioning'] = batch.get(self.concat_key)
-        
-        eps = self.get_noise(x0)
-        if split == "train":
-            t = torch.multinomial(torch.arange(self.timesteps, device=x0.device) ** 1.5, b)
-            xt = self.q_xt_given_x0(x0, t, noise=eps).sample()
-                
-            x0pred = self.model(xt, t, **conditions)
-            
-            logs["inputs"] = x0.argmax(1)
-            logs[f"xt{t.cpu().numpy().tolist()}"] = xt.argmax(1)
-            logs["samples"] = x0pred.argmax(1)
-            
-            return logs
-        else:
             x0pred = self.denoising(eps, init_t=init_t, end_t=end_t, conditions=conditions, verbose=verbose)
             
             logs["inputs"] = x0.argmax(1)
