@@ -8,8 +8,6 @@ import torch.nn as nn
 import SimpleITK as sitk
 from tqdm import tqdm
 from einops import rearrange
-import sys
-sys.path.append('/ailab/user/dailinrui/code/latentdiffusion')
 from ldm.util import instantiate_from_config
 from ldm.modules.diffusionmodules.util import make_beta_schedule
 from torch.distributions.one_hot_categorical import OneHotCategorical

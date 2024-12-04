@@ -30,23 +30,25 @@ model:
         use_checkpoint: true  # always use ckpt
 
     first_stage_config:
-      # no loss needed
-      lossconfig:
-        target: nn.Identity
-      # copy the following from vq model
-      ddconfig:
-        double_z: false
-        z_channels: 8
-        resolution: [128, 128, 128]
-        in_channels: 1
-        out_ch: 1
-        ch: 128
-        ch_mult: [ 1, 1, 1 ]  
-        num_res_blocks: 2
-        attn_resolutions: []
-        dropout: 0.0
-        dims: 3
-        attn_type: none
+      target: ldm.models.autoencoder.VQModelInterface
+      params:
+        # no loss needed
+        lossconfig:
+          target: nn.Identity
+        # copy the following from vq model
+        ddconfig:
+          double_z: false
+          z_channels: 8
+          resolution: [128, 128, 128]
+          in_channels: 1
+          out_ch: 1
+          ch: 128
+          ch_mult: [ 1, 1, 1 ]  
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+          dims: 3
+          attn_type: none
 
     cond_stage_config: 
       target: ldm.modules.encoders.modules.ResizeConditionEncoder

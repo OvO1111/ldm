@@ -6,7 +6,6 @@ from tqdm import tqdm
 from functools import partial
 
 from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, make_ddim_timesteps, noise_like
-from ldm.models.diffusion.measurements import FMCIBMeasurement
 
 
 class DDIMStepSolver:
@@ -210,7 +209,7 @@ class DDIMSampler(object):
         device = self.model.betas.device
         b = shape[0]
         if x_T is None:
-            img = torch.randn(shape, device=device, dtype=cond.dtype)
+            img = torch.randn(shape, device=device, dtype=cond.dtype if cond is not None else torch.float32)
         else:
             img = x_T
 

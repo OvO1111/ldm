@@ -26,7 +26,7 @@ from monai.transforms import (
 )
 
 from monai.data.dataset import CacheDataset
-from data.utils import LabelParser, OrganTypeBase
+from ldm.data.utils import LabelParser, OrganTypeBase
 from torch.utils.data import default_collate, Dataset
 
 
@@ -136,13 +136,14 @@ class SimpleDataset:
 
 
 class DummyDataset(Dataset):
-    def __init__(self, **kw):
+    def __init__(self, output_size, **kw):
+        self.output_size = tuple(output_size)
         super().__init__()
     
     def __len__(self):
         return 100
     
-    def __getitem__(self):
-        return {"image": torch.randn((96, 96, 96)).float(),
-                "label": torch.ones((96, 96, 96)).long(),
+    def __getitem__(self, _):
+        return {"image": torch.ones((1,) + self.output_size).float(),
+                "label": torch.ones((1,) + self.output_size).long(),
                 "text": "this is a dummy dataset"}
