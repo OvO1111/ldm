@@ -1,0 +1,71 @@
+model:
+  base_learning_rate: 1.e-4
+  train_target: ldm.models.downstream.segmentation.Segmentator
+  test_target: inference.models.InferSegmentator
+
+  params:
+    num_classes: 7
+    image_key: image
+    seg_key: label
+    backbone_name: swinunetr
+    crop_input: true
+    monitor: val.dc.mean_epoch
+    image_size: [128, 128, 128]
+
+  test_only_params:
+    ckpt_path: $path
+    save_dataset: true 
+    save_dataset_path: $path
+    suffix_keys: 
+      mask: .nii.gz
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 1
+    num_workers: 4
+    wrap: False
+    train:
+      target: ldm.data.nnunet.nnUNetLikeDataset
+      params:
+        dataset_base: /ailab/user/dailinrui/data/nnUNetv2/nnUNet_raw/Dataset105_normalloss
+        split: train
+        fold: 1
+    validation:
+      target: ldm.data.nnunet.nnUNetLikeDataset
+      params:
+        dataset_base: /ailab/user/dailinrui/data/nnUNetv2/nnUNet_raw/Dataset105_normalloss
+        split: val
+        fold: 1
+    test:
+      target: ldm.data.nnunet.nnUNetLikeDataset
+      params:
+        dataset_base: /ailab/user/dailinrui/data/nnUNetv2/nnUNet_raw/Dataset105_normalloss
+        split: val
+        fold: 1
+
+lightning:
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        train_batch_frequency: 200
+        max_images: 10
+        log_images_kwargs: 
+          ddim_steps: 50
+        logger:
+          inputs: 
+            target: image_rescale
+          conditioning:
+            target: image_rescale
+          reconstruction:
+            target: image_rescale
+          samples:
+            target: image_rescale
+
+  trainer:
+    benchmark: true
+    max_epochs: 1000
+    replace_sampler_ddp: false
+    limit_test_batches: 500
+    num_sanity_val_steps: 0

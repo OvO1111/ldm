@@ -1,4 +1,4 @@
-import h5py, numpy as np
+import os, numpy as np
 
 import json, torch
 from functools import reduce
@@ -146,4 +146,5 @@ class DummyDataset(Dataset):
     def __getitem__(self, _):
         return {"image": torch.ones((1,) + self.output_size).float(),
                 "label": torch.ones((1,) + self.output_size).long(),
-                "text": "this is a dummy dataset"}
+                "text": "this is a dummy dataset",
+                "aux": torch.ones((len("this is a dummy dataset"), 768)).float()}

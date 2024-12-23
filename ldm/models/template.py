@@ -56,14 +56,14 @@ class BasePytorchLightningTrainer(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         loss, loss_dict = self.shared_step(batch)
-        if loss_dict is not None: self.log_dict(loss_dict, prog_bar=True, on_step=True, on_epoch=True, logger=True)
+        if loss_dict is not None: self.log_dict(loss_dict, prog_bar=True, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         self.log("global_step", self.global_step, prog_bar=False, logger=True, on_step=True, on_epoch=False)
         return loss
     
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
         loss, loss_dict = self.shared_step(batch)
-        if loss_dict is not None: self.log_dict(loss_dict, prog_bar=True, on_step=True, on_epoch=True, logger=True)
+        if loss_dict is not None: self.log_dict(loss_dict, prog_bar=True, on_step=True, on_epoch=True, logger=True, sync_dist=True)
     
     @torch.no_grad()
     def log_images(self, batch, N=8, *args, **kwargs):

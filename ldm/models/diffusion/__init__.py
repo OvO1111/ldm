@@ -1,2 +1,2 @@
 from .cdpm import CategoricalDiffusion
-from .ddpm import DDPM, LatentDiffusion, CoarseAndFineDiffusion
+from .ddpm import DDPM, LatentDiffusion

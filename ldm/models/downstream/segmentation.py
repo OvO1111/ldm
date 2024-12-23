@@ -4,13 +4,16 @@ import torch.nn.functional as F
 
 import math
 import random
+import numpy as np
 from einops import rearrange, repeat
 from ldm.models.template import BasePytorchLightningTrainer
 from ldm.modules.diffusionmodules.model import Downsample, Upsample, make_attn, checkpoint
 from torch.optim.lr_scheduler import LinearLR, LambdaLR
+from scipy.ndimage import label
 import medpy.metric.binary as bin
 
 from monai.networks.nets.unet import UNet 
+from monai.networks.nets.vnet import VNet
 from monai.networks.nets.unetr import UNETR
 from monai.networks.nets.basic_unetplusplus import BasicUNetPlusPlus
 from monai.networks.nets.swin_unetr import SwinUNETR
@@ -24,6 +27,7 @@ class Segmentator(BasePytorchLightningTrainer):
                  seg_key="mask",
                  backbone_name=None,
                  in_chns=1,
+                 crop_input=False,
                  ckpt_path=None,
                  ignore_keys=[],
                  only_load_model=True,
@@ -34,6 +38,7 @@ class Segmentator(BasePytorchLightningTrainer):
         self.dims = dims
         self.image_key = image_key
         self.seg_key = seg_key
+        self.crop_input = crop_input
         self.image_size = image_size
         self.num_classes = num_classes
         self.in_chns = in_chns
@@ -45,10 +50,12 @@ class Segmentator(BasePytorchLightningTrainer):
         
     def get_input(self, batch, *keys):
         images = [batch[k] for k in keys]
-        if self.training:
-            return self.get_input_train(images)
-        else:
-            return self.get_input_val(images)
+        if self.crop_input:
+            if self.training:
+                return self.get_input_train(images)
+            else:
+                return self.get_input_val(images)
+        return images
         
     def get_input_val(self, images):
         # return generator of patches
@@ -62,30 +69,64 @@ class Segmentator(BasePytorchLightningTrainer):
                 for k in range(0, d, self.image_size[2]):
                     patch = [padder(im)[:, :, i: i + self.image_size[0], j: j + self.image_size[1], k: k + self.image_size[2]] for im in images]
                     yield patch, (i, j, k)
-        
-    def get_input_train(self, images):
-        # crop to patch
-        image = images[1]
-        output_size = self.image_size
-        pw = max((output_size[0] - image.shape[1]) // 2 + 3, 0)
-        ph = max((output_size[1] - image.shape[2]) // 2 + 3, 0)
-        pd = max((output_size[2] - image.shape[3]) // 2 + 3, 0)
-        image = torch.nn.functional.pad(image, (pd, pd, ph, ph, pw, pw), mode='constant', value=0)
+                    
+    def _patch_cropper(self, _image, _mode="random", _pad_value=0, _hazy=False):
+        _image = _image[0]
+        _output_size = self.image_size
+        # maybe pad image if _output_size is larger than _image.shape
+        ph = max((_output_size[0] - _image.shape[1]) // 2 + 3, 0)
+        pw = max((_output_size[1] - _image.shape[2]) // 2 + 3, 0)
+        pd = max((_output_size[2] - _image.shape[3]) // 2 + 3, 0)
+        padder = lambda x: torch.nn.functional.pad(x, (pd, pd, ph, ph, pw, pw), mode='constant', value=0)
+        _image = padder(_image)
+        # padder = identity
+            
+        if _mode == "random":
+            h_center = random.randint(ph, _image.shape[1] - ph)
+            w_center = random.randint(pw, _image.shape[2] - pw)
+            d_center = random.randint(pd, _image.shape[3] - pd)
 
-        (b, c, w, h, d) = image.shape
-        wl, wr = torch.where(torch.any(torch.any(image, 3), 3))[-1][[0, -1]]
-        hl, hr = torch.where(torch.any(torch.any(image, 2), -1))[-1][[0, -1]]
-        dl, dr = torch.where(torch.any(torch.any(image, 2), 2))[-1][[0, -1]]
-        if wl > w - output_size[0]: w1 = random.randint(0, w-output_size[0])
-        else: w1 = random.randint(wl, min(w - output_size[0], wr))
-        if hl > h - output_size[1]: h1 = random.randint(0, h-output_size[1])
-        else: h1 = random.randint(hl, min(h - output_size[1], hr))
-        if dl > d - output_size[2]: d1 = random.randint(0, d-output_size[2])
-        else: d1 = random.randint(dl, min(d - output_size[2], dr))
+        elif _mode == "foreground":
+            if _image.sum() == 0: return self._patch_cropper(_image, _output_size, "random", _pad_value)
+            
+            _hl, _hr = torch.where(torch.any(torch.any(_image, 2), 2))[-1][[0, -1]]
+            _wl, _wr = torch.where(torch.any(torch.any(_image, 1), -1))[-1][[0, -1]]
+            _dl, _dr = torch.where(torch.any(torch.any(_image, 1), 1))[-1][[0, -1]]
+            if _hazy: _label = _image
+            else:
+                _label, _n = label(_image[:, _hl: _hr + 1, _wl: _wr + 1, _dl: _dr + 1].data.cpu().numpy())
+                _label = torch.tensor(_label == random.randint(1, _n), dtype=_image.dtype, device=_image.device)
+            hl, hr = torch.where(torch.any(torch.any(_label, 2), 2))[-1][[0, -1]] + _hl
+            wl, wr = torch.where(torch.any(torch.any(_label, 1), -1))[-1][[0, -1]] + _wl
+            dl, dr = torch.where(torch.any(torch.any(_label, 1), 1))[-1][[0, -1]] + _dl
+            hc, hd = (hl + hr) // 2, hr - hl + 1
+            wc, wd = (wl + wr) // 2, wr - wl + 1
+            dc, dd = (dl + dr) // 2, dr - dl + 1
+            
+            h_center = random.randint(hc - hd // 4, max(hc + hd // 4, hc - hd // 4 + 1))
+            w_center = random.randint(wc - wd // 4, max(wc + wd // 4, wc - wd // 4 + 1))
+            d_center = random.randint(dc - dd // 4, max(dc + dd // 4, dc - dd // 4 + 1))
         
-        padder = (lambda x: x) if pw + ph + pd == 0 else lambda x: torch.nn.functional.pad(x, (pd, pd, ph, ph, pw, pw), mode='constant', value=0)
-        cropper = [slice(w1, w1 + output_size[0]), slice(h1, h1 + output_size[1]), slice(d1, d1 + output_size[2])]
-        inputs = [padder(im)[:, :, *cropper] for im in images]
+        h_left = max(0, h_center - _output_size[0] // 2)
+        h_right = min(_image.shape[1], h_center + _output_size[0] // 2)
+        h_offset = (max(0, _output_size[0] // 2 - h_center), max(0, h_center + _output_size[0] // 2 - _image.shape[1]))
+        w_left = max(0, w_center - _output_size[1] // 2)
+        w_right = min(_image.shape[2], w_center + _output_size[1] // 2)
+        w_offset = (max(0, _output_size[1] // 2 - w_center), max(0, w_center + _output_size[1] // 2 - _image.shape[2]))
+        d_left = max(0, d_center - _output_size[2] // 2)
+        d_right = min(_image.shape[3], d_center + _output_size[2] // 2) 
+        d_offset = (max(0, _output_size[2] // 2 - d_center), max(0, d_center + _output_size[2] // 2 - _image.shape[3]))
+        cropper = lambda x: x[:, :, h_left: h_right, w_left: w_right, d_left: d_right]
+        post_padder = lambda x: torch.nn.functional.pad(x, 
+                                                        (*d_offset, *w_offset, *h_offset),
+                                                        mode='constant', value=_pad_value)
+            
+        return padder, cropper, post_padder 
+        
+    def get_input_train(self, images, fg_prob=0.7):
+        mode = "foreground" if random.random() < fg_prob else "random"
+        padder, cropper, post_padder = self._patch_cropper(images[1], _mode=mode, _pad_value=0)  # index 0 is image, 1 is seg
+        inputs = [post_padder(cropper(padder(im))) for im in images]
         return inputs if len(inputs) > 1 else inputs[0]
         
     def _get_model(self, model_name,):
@@ -95,6 +136,8 @@ class Segmentator(BasePytorchLightningTrainer):
             self.model = UNet(self.dims, in_channels, self.num_classes, 
                               channels=(16, 32, 64, 128, 256),
                               strides=(2, 2, 2, 2))
+        elif model_name == 'vnet':
+            self.model = VNet(self.dims, in_channels, self.num_classes)
         elif model_name == 'unetr':
             self.model = UNETR(spatial_dims=self.dims,
                                feature_size=64,
@@ -103,7 +146,7 @@ class Segmentator(BasePytorchLightningTrainer):
                                img_size=self.image_size)
         elif model_name == 'swinunetr':
             self.model = SwinUNETR(img_size=self.image_size,
-                                   feature_size=64,
+                                   feature_size=48,
                                    num_heads=(4, 8, 16, 32),
                                    in_channels=in_channels,
                                    out_channels=self.num_classes,)
@@ -115,7 +158,7 @@ class Segmentator(BasePytorchLightningTrainer):
     
     def _multiclass_metrics(self, x, y, prefix=""):
         logs = {}
-        for m in ["dc", "hd95"]:
+        for m in ["dc"]:#, "hd95"]:
             for i in range(1, self.num_classes):
                 if (x == i).sum() == 0 or (y == i).sum() == 0: result = 0
                 else: result = getattr(bin, m, lambda *a: 0)(x == i, y == i)
@@ -156,10 +199,13 @@ class Segmentator(BasePytorchLightningTrainer):
         loss_dict[f"{prefix}/loss"] = loss
         # metrics
         metric_dict = self._multiclass_metrics(model_outputs.argmax(1).cpu().numpy(),
-                                                seg.cpu().numpy(),
-                                                prefix)
-        self.log_dict(metric_dict, logger=True, prog_bar=True, on_step=True, on_epoch=True)
-        self.log_dict(loss_dict, prog_bar=True, on_step=True, on_epoch=True, logger=True)
+                                               seg.cpu().numpy(),
+                                               prefix)
+        metric_dict['train/dc/mean'] = np.mean([metric_dict[f"train/dc/{i}"] for i in range(1, self.num_classes)])
+        # metric_dict['train/hd95/mean'] = [metric_dict[f"train/hd95/{i}"] for i in range(1, self.num_classes)]
+        self.log('train.dc.mean', metric_dict['train/dc/mean'], prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=True)
+        self.log_dict(metric_dict, logger=True, on_step=True, on_epoch=True, sync_dist=True)
+        self.log_dict(loss_dict, prog_bar=True, on_step=True, on_epoch=True, logger=True, sync_dist=True)
         self.log("global_step", self.global_step, prog_bar=False, logger=True, on_step=True, on_epoch=False)
         return loss
     
@@ -182,16 +228,19 @@ class Segmentator(BasePytorchLightningTrainer):
             for k, v in iter_metric.items():
                 if k not in metric_dict: metric_dict[k] = v
                 else: metric_dict[k] = (metric_dict[k] * itr + v) / (itr + 1)
-                
-        self.log_dict(metric_dict, logger=True, prog_bar=True, on_step=True, on_epoch=True)
-        self.log_dict(loss_dict, prog_bar=False, on_step=False, on_epoch=True, logger=True)
+        
+        metric_dict['val/dc/mean'] = np.mean([metric_dict[f"val/dc/{i}"] for i in range(1, self.num_classes)])
+        # metric_dict['train/hd95/mean'] = [metric_dict[f"train/hd95/{i}"] for i in range(1, self.num_classes)]
+        self.log('val.dc.mean', metric_dict['val/dc/mean'], prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=True)      
+        self.log_dict(metric_dict, logger=True, prog_bar=False, on_step=True, on_epoch=True, sync_dist=True)
+        self.log_dict(loss_dict, prog_bar=False, on_step=False, on_epoch=True, logger=True, sync_dist=True)
         self.log("global_step", self.global_step, prog_bar=False, logger=True, on_step=True, on_epoch=False)
         return loss
     
     def log_images(self, batch, **kw):
         logs = {}
         
-        if self.training:
+        if self.training or not self.crop_input:
             image, seg = self.get_input(batch, self.image_key, self.seg_key)
             seg = seg.long()
             

@@ -53,9 +53,12 @@ class VectorQuantizer(nn.Module):
         z_flattened = z.view(-1, self.e_dim)
         # distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
 
-        d = torch.sum(z_flattened ** 2, dim=1, keepdim=True) + \
-            torch.sum(self.embedding.weight**2, dim=1) - 2 * \
-            torch.matmul(z_flattened, self.embedding.weight.t())
+        # d = torch.sum(z_flattened ** 2, dim=1, keepdim=True) + \
+        #     torch.sum(self.embedding.weight**2, dim=1) - 2 * \
+        #     torch.matmul(z_flattened, self.embedding.weight.t())
+            
+        d = -2 * torch.matmul(z_flattened, self.embedding.weight.T)
+        d += (z_flattened ** 2).sum(dim=1, keepdim=True) + (self.embedding.weight ** 2).sum(dim=1)
 
         ## could possible replace this here
         # #\start...

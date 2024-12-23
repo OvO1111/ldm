@@ -22,10 +22,10 @@ from pytorch_lightning.utilities.rank_zero import rank_zero_only
 
 from ldm.util import log_txt_as_img, exists, default, ismap, isimage, mean_flat, count_params, instantiate_from_config
 from ldm.modules.ema import LitEma
+from ldm.models.diffusion.sampling.ddim import DDIMSampler
 from ldm.modules.distributions.distributions import normal_kl, DiagonalGaussianDistribution
 from ldm.models.autoencoder import VQModelInterface, IdentityFirstStage, AutoencoderKL
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
-from ldm.models.diffusion.ddim import DDIMSampler, FMCIBScoreCorrector
 
 
 __conditioning_keys__ = {'concat': 'c_concat',
@@ -90,7 +90,7 @@ class DDPM(pl.LightningModule):
                  ignore_keys=[],
                  load_only_unet=False,
                  monitor="val/loss",
-                 use_ema=True,
+                 use_ema=False,
                  first_stage_key="image",
                  image_size=256,
                  channels=3,
@@ -118,7 +118,7 @@ class DDPM(pl.LightningModule):
         self.clip_denoised = clip_denoised
         self.log_every_t = log_every_t
         self.first_stage_key = first_stage_key
-        self.image_size = image_size  # try conv?
+        self.infer_image_size = image_size  # try conv?
         self.channels = channels
         self.use_positional_encodings = use_positional_encodings
         self.model = DiffusionWrapper(unet_config, conditioning_key)
@@ -312,7 +312,7 @@ class DDPM(pl.LightningModule):
 
     @torch.no_grad()
     def sample(self, batch_size=16, return_intermediates=False):
-        image_size = self.image_size
+        image_size = self.infer_image_size
         channels = self.channels
         return self.p_sample_loop((batch_size, channels,) + tuple(image_size),
                                   return_intermediates=return_intermediates)
@@ -473,6 +473,7 @@ class LatentDiffusion(DDPM):
     def __init__(self,
                  first_stage_config,
                  cond_stage_config,
+                 ddim_config={},
                  num_timesteps_cond=None,
                  cond_stage_key="image",
                  cond_stage_trainable=False,
@@ -481,7 +482,6 @@ class LatentDiffusion(DDPM):
                  conditioning_key=None,
                  scale_factor=1.0,
                  scale_by_std=False,
-                 score_corrector_config=None,
                  *args, **kwargs):
         self.num_timesteps_cond = default(num_timesteps_cond, 1)
         self.scale_by_std = scale_by_std
@@ -507,8 +507,6 @@ class LatentDiffusion(DDPM):
             self.register_buffer('scale_factor', torch.tensor(scale_factor))
         self.instantiate_first_stage(first_stage_config)
         self.instantiate_cond_stage(cond_stage_config)
-        self.instantiate_score_corrector(score_corrector_config)
-        # self.score_corrector_config = score_corrector_config
         self.cond_stage_forward = cond_stage_forward
         self.clip_denoised = False
         self.bbox_tokenizer = None  
@@ -521,14 +519,13 @@ class LatentDiffusion(DDPM):
         self.is_conditional_first_stage = False
         if hasattr(self.first_stage_model, "is_conditional"):
             if self.first_stage_model.is_conditional: self.is_conditional_first_stage = True
+        
+        self.ddim_config = dict(ddim_config) | {"final_image_size": self.infer_image_size}
 
     def make_cond_schedule(self, ):
         self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
         ids = torch.round(torch.linspace(0, self.num_timesteps - 1, self.num_timesteps_cond)).long()
         self.cond_ids[:self.num_timesteps_cond] = ids
-
-    # def on_train_start(self):
-    #     self.instantiate_score_corrector(self.score_corrector_config)
 
     @rank_zero_only
     @torch.no_grad()
@@ -584,13 +581,6 @@ class LatentDiffusion(DDPM):
             assert config != '__is_unconditional__'
             model = instantiate_from_config(config)
             self.cond_stage_model = model
-            
-    def instantiate_score_corrector(self, config):
-        if config is not None:
-            self.ddim_score_corrector = instantiate_from_config(config)
-            # self.ddim_score_corrector.to(self.device)
-        else:
-            self.ddim_score_corrector = None
 
     def _get_denoise_row_from_list(self, samples, c=None, desc='', force_no_decoder_quantization=False):
         denoise_row = []
@@ -1288,7 +1278,7 @@ class LatentDiffusion(DDPM):
                verbose=True, timesteps=None, quantize_denoised=False,
                mask=None, x0=None, shape=None,**kwargs):
         if shape is None:
-            shape = (batch_size, self.channels,) + tuple(self.image_size)
+            shape = (batch_size, self.channels,) + tuple(self.infer_image_size)
         if cond is not None:
             if isinstance(cond, dict):
                 cond = {key: cond[key][:batch_size] if not isinstance(cond[key], list) else
@@ -1302,13 +1292,13 @@ class LatentDiffusion(DDPM):
                                   mask=mask, x0=x0)
 
     @torch.no_grad()
-    def sample_log(self,cond,batch_size,ddim, ddim_steps,**kwargs):
+    def sample_log(self, cond, batch_size, ddim, ddim_steps, **kwargs):
 
         if ddim:
-            ddim_sampler = DDIMSampler(self)
-            shape = (self.channels, ) + tuple(self.image_size)
+            ddim_sampler = DDIMSampler(self, **self.ddim_config)
+            shape = (self.channels, ) + tuple(self.infer_image_size)
             samples, intermediates = ddim_sampler.sample(ddim_steps, batch_size,
-                                                         shape, cond, verbose=False, score_corrector=self.ddim_score_corrector, **kwargs)
+                                                         shape, cond, verbose=False, **kwargs)
 
         else:
             samples, intermediates = self.sample(cond=cond, batch_size=batch_size,
@@ -1375,7 +1365,7 @@ class LatentDiffusion(DDPM):
             # get denoise row
             with self.ema_scope():
                 samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
-                                                         ddim_steps=ddim_steps, eta=ddim_eta, corrector_kwargs={"batch":batch})
+                                                         ddim_steps=ddim_steps, eta=ddim_eta, batch=batch)
                 # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
             x_samples = self.decode_first_stage(samples, cf)
             log["samples"] = x_samples
@@ -1392,7 +1382,7 @@ class LatentDiffusion(DDPM):
                 with self.ema_scope("Plotting Quantized Denoised"):
                     samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
                                                              ddim_steps=ddim_steps, eta=ddim_eta,
-                                                             quantize_denoised=True, corrector_kwargs={"batch":batch})
+                                                             quantize_denoised=True, batch=batch)
                     # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True,
                     #                                      quantize_denoised=True)
                 x_samples = self.decode_first_stage(samples.to(self.device), cf)
@@ -1408,7 +1398,7 @@ class LatentDiffusion(DDPM):
                 with self.ema_scope("Plotting Inpaint"):
 
                     samples, _ = self.sample_log(cond=c,batch_size=N,ddim=use_ddim, eta=ddim_eta,
-                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask, corrector_kwargs={"batch":batch})
+                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask, batch=batch)
                 x_samples = self.decode_first_stage(samples.to(self.device), cf)
                 log["samples_inpainting"] = x_samples
                 log["mask"] = mask
@@ -1416,14 +1406,14 @@ class LatentDiffusion(DDPM):
                 # outpaint
                 with self.ema_scope("Plotting Outpaint"):
                     samples, _ = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,eta=ddim_eta,
-                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask, corrector_kwargs={"batch":batch})
+                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask, batch=batch)
                 x_samples = self.decode_first_stage(samples.to(self.device), cf)
                 log["samples_outpainting"] = x_samples
 
         if plot_progressive_rows:
             with self.ema_scope("Plotting Progressives"):
                 img, progressives = self.progressive_denoising(c,
-                                                               shape=(self.channels,) + tuple(self.image_size),
+                                                               shape=(self.channels,) + tuple(self.infer_image_size),
                                                                batch_size=N)
             prog_row = self._get_denoise_row_from_list(progressives, cf, desc="Progressive Generation")
             log["progressive_row"] = prog_row
@@ -1496,179 +1486,5 @@ class DiffusionWrapper(pl.LightningModule):
             raise NotImplementedError()
 
         return out
-    
-    
-class CoarseAndFineDiffusion(LatentDiffusion):
-    def __init__(self, foreground_loss_coef=1., foreground_fine_coef=.5, n_fine=3, **kw):
-        super().__init__(**kw)
-        self.foreground_loss_coef = foreground_loss_coef
-        self.foreground_fine_coef = foreground_fine_coef
-        self.n_fine = n_fine
-        
-    def get_loss(self, c, pred, target, mean=True):
-        if self.loss_type == 'l1':
-            loss = (target - pred).abs()
-            if mean:
-                loss = loss.mean()
-        elif self.loss_type == 'l2':
-            if mean:
-                loss = torch.nn.functional.mse_loss(target, pred)
-            else:
-                loss = torch.nn.functional.mse_loss(target, pred, reduction='none')
-        else:
-            raise NotImplementedError("unknown loss type '{loss_type}'")
-        
-        loss = loss * ((c[:, 1:2] > 0) * self.foreground_loss_coef + 1)  # boost foreground loss, chn0: fine, chn1: coarse
-        # for i_fine in range(1, self.n_fine):
-        #     mask = c[:, 0:1] == i_fine / self.n_fine
-        #     if mask.sum() > 0:
-        #         loss = loss * (mask * torch.clamp(c[:, 1].sum() / mask.sum(), 0, 1e2) * self.foreground_fine_coef + 1)
-        return loss
-    
-    def on_fit_start(self):
-        # if hasattr(self.model.diffusion_model, "unfreeze_unet") and callable(self.model.diffusion_model.freeze_unet):
-        #     self.model.diffusion_model.unfreeze_unet()
-        # if hasattr(self.model.diffusion_model, "freeze_control_net") and callable(self.model.diffusion_model.unfreeze_control_net):
-        #     self.model.diffusion_model.freeze_control_net()
-        if hasattr(self.model.diffusion_model, "copy_params") and callable(self.model.diffusion_model.copy_params):
-            self.model.diffusion_model.copy_params()
-    
-    # def on_train_batch_end(self, loss, batch, batch_idx, **kwargs):
-    #     if sum(batch.get("use_fine", [])) > 0:
-    #         # print("freeze unet")
-    #         if hasattr(self.model.diffusion_model, "freeze_unet") and callable(self.model.diffusion_model.freeze_unet):
-    #             self.model.diffusion_model.freeze_unet()
-    #         if hasattr(self.model.diffusion_model, "unfreeze_control_net") and callable(self.model.diffusion_model.unfreeze_control_net):
-    #             self.model.diffusion_model.unfreeze_control_net()
-    
-    def p_losses(self, x_start, cond, t, noise=None):
-        noise = default(noise, lambda: torch.randn_like(x_start))
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        model_output = self.apply_model(x_noisy, t, cond)
-
-        loss_dict = {}
-        prefix = 'train' if self.training else 'val'
-
-        if self.parameterization == "x0":
-            target = x_start
-        elif self.parameterization == "eps":
-            target = noise
-        else:
-            raise NotImplementedError()
-
-        loss_simple = self.get_loss(cond, model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
-        loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
-
-        logvar_t = self.logvar.to(self.device)[t]
-        loss = loss_simple / torch.exp(logvar_t) + logvar_t
-        # loss = loss_simple / torch.exp(self.logvar) + self.logvar
-        if self.learn_logvar:
-            loss_dict.update({f'{prefix}/loss_gamma': loss.mean()})
-            loss_dict.update({'logvar': self.logvar.data.mean()})
-
-        loss = self.l_simple_weight * loss.mean()
-
-        loss_vlb = self.get_loss(cond, model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
-        loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
-        loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
-        loss += (self.original_elbo_weight * loss_vlb)
-        loss_dict.update({f'{prefix}/loss': loss})
-
-        return loss, loss_dict
-    
-    def configure_optimizers(self):
-        lr = self.learning_rate
-        params = list(v for k, v in self.model.diffusion_model.named_parameters() if "control" not in k)
-        if self.cond_stage_trainable:
-            print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
-            params = params + list(self.cond_stage_model.parameters())
-        if self.learn_logvar:
-            print('Diffusion model optimizing logvar')
-            params.append(self.logvar)
-        params_control = list(v for k, v in self.model.diffusion_model.named_parameters() if "control" in k)
-        opt1 = torch.optim.AdamW(params, lr=lr)
-        opt2 = torch.optim.AdamW(params_control, lr=lr)
-        sch1 = torch.optim.lr_scheduler.LambdaLR(opt1, lr_lambda=lambda epoch: (1 - epoch / self.trainer.max_epochs) ** 0.9)
-        sch2 = torch.optim.lr_scheduler.LambdaLR(opt2, lr_lambda=lambda epoch: 1 - (1 - epoch / self.trainer.max_epochs) ** 0.9)
-        return [opt1, opt2], [sch1, sch2]
-    
-    
-class RiskDiffusion(LatentDiffusion):
-    def __init__(self, **kw):
-        super().__init__(**kw)
-        
-    def p_losses(self, x_start, cond, t, noise=None):
-        noise = default(noise, lambda: torch.randn_like(x_start))
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        model_output, model_latents = self.apply_model(x_noisy, t, cond)
-
-        loss_dict = {}
-        prefix = 'train' if self.training else 'val'
-
-        if self.parameterization == "x0":
-            target = x_start
-        elif self.parameterization == "eps":
-            target = noise
-        else:
-            raise NotImplementedError()
-
-        # diffusion loss
-        loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
-        loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
-
-        logvar_t = self.logvar.to(self.device)[t]
-        loss = loss_simple / torch.exp(logvar_t) + logvar_t
-        # loss = loss_simple / torch.exp(self.logvar) + self.logvar
-        if self.learn_logvar:
-            loss_dict.update({f'{prefix}/loss_gamma': loss.mean()})
-            loss_dict.update({'logvar': self.logvar.data.mean()})
-
-        loss = self.l_simple_weight * loss.mean()
-
-        loss_vlb = self.get_loss(model_output, target, mean=False).mean([1, 2, 3] + [4,] if self.dims == 3 else [])
-        loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
-        loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
-        loss += (self.original_elbo_weight * loss_vlb)
-        loss_dict.update({f'{prefix}/loss': loss})
-        
-        # similarity loss
-        model_latents = model_latents.view(model_latents.shape[0], -1)
-        model_latents = model_latents / torch.linalg.norm(model_latents, dim=1, keepdim=True)
-        cond_latents = cond.view(cond.shape[0], -1)
-        cond_latents = cond_latents / torch.linalg.norm(cond_latents, dim=1, keepdim=True)
-        
-        temperature = 1 - t / self.num_timesteps
-        sim_latents = torch.log_softmax((model_latents @ model_latents.T) / temperature, dim=1)
-        sim_target = torch.log_softmax((cond_latents @ cond_latents.T) / temperature, dim=1)
-        loss_sim = torch.nn.functional.kl_div(sim_latents, sim_target, log_target=True, reduction='none').mean() / 100
-        loss_dict.update({f'{prefix}/loss_sim': loss_sim})
-        loss += loss_sim
-
-        return loss, loss_dict
-    
-    def configure_optimizers(self):
-        lr = self.learning_rate
-        params = list(self.model.parameters())
-        if self.cond_stage_trainable:
-            print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
-            params = params + list(self.cond_stage_model.parameters())
-        if self.learn_logvar:
-            print('Diffusion model optimizing logvar')
-            params.append(self.logvar)
-        opt = torch.optim.AdamW(params, lr=lr)
-        if self.use_scheduler:
-            assert 'target' in self.scheduler_config
-            scheduler = instantiate_from_config(self.scheduler_config)
-
-            print("Setting up LambdaLR scheduler...")
-            scheduler = [
-                {
-                    'scheduler': LambdaLR(opt, lr_lambda=scheduler.schedule),
-                    'interval': 'step',
-                    'frequency': 1
-                }]
-            return [opt], scheduler
-        return opt
-    
     
     

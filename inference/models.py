@@ -15,10 +15,15 @@ from medpy.metric import binary
 from collections import defaultdict
 from einops import rearrange, repeat
 from ldm.data.utils import load_or_write_split
-from ldm.models.autoencoder import AutoencoderKL, VQModelInterface
-from ldm.models.diffusion.ddpm import LatentDiffusion
-from ldm.models.diffusion.cdpm import CategoricalDiffusion, OneHotCategoricalBCHW
 
+from ldm.models import (
+    AutoencoderKL,
+    VQModelInterface,
+    LatentDiffusion,
+    CategoricalDiffusion,
+    OneHotCategoricalBCHW,
+    Segmentator
+)
 from ldm.modules.diffusionmodules.util import extract_into_tensor
 
 
@@ -296,6 +301,36 @@ class InferCategoricalDiffusion(CategoricalDiffusion, MakeDataset):
     @torch.no_grad()
     def log_images(self, batch, **kwargs):
         logs = super(InferCategoricalDiffusion, self).log_images(batch, **kwargs)
+        x = logs["inputs"]
+        x_recon = logs["samples"]
+        if x.ndim < self.dims + 2: x = x[:, None]
+        if x_recon.ndim < self.dims + 2: x_recon = x_recon[:, None]
+        
+        if self.save_dataset:
+            self.add({"inputs": x, "samples": x_recon}, batch.get("casename"), dtypes={"inputs": np.uint8, "samples": np.uint8})
+        return logs
+    
+
+class InferSegmentation(Segmentator, MakeDataset):
+    def __init__(self, 
+                 save_dataset=False,
+                 save_dataset_path=None,
+                 suffix_keys={"data":".nii.gz",},
+                 **segmentation_kwargs):
+        Segmentator.__init__(self, **segmentation_kwargs)
+        self.save_dataset = save_dataset
+        if save_dataset:
+            assert exists(save_dataset_path)
+            MakeDataset.__init__(self, save_dataset_path, suffix_keys)
+        self.eval()
+        
+    @torch.no_grad()
+    def test_step(self, batch, batch_idx):
+        pass
+    
+    @torch.no_grad()
+    def log_images(self, batch, **kwargs):
+        logs = super(InferSegmentation, self).log_images(batch, **kwargs)
         x = logs["inputs"]
         x_recon = logs["samples"]
         if x.ndim < self.dims + 2: x = x[:, None]

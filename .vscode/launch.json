@@ -25,7 +25,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/latent-diffusion/difftumor_128_128_128_ldm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug", "--precision", "32"],
+            "args": ["-b", "./configs/latent-diffusion/template_vq_ldm.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug", "--precision", "32"],
             "console": "integratedTerminal"
         },
         {
@@ -73,7 +73,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/downstream/msd_seg.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug", "--scale_lr", "0"],
+            "args": ["-b", "./configs/downstream/segmentation.yaml", "-t", "--gpus", "0,", "--name", "test", "--debug", "--scale_lr", "0"],
             "console": "integratedTerminal"
         },
     ]

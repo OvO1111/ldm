@@ -1,6 +1,6 @@
 # ignore dependent ckpts 
 dependency/*
-compr
+compr/
 
 # ignore slurm runs
 run/
@@ -14,5 +14,6 @@ __pycache__
 
 execute.sh
 helpers/
+outs/
 
 *.json

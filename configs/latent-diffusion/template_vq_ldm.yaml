@@ -12,7 +12,7 @@ model:
     first_stage_key: image
     cond_stage_key: label
     conditioning_key: concat
-    image_size: [64, 64, 64]  # after first-stage encoding
+    image_size: [64, 64, 64]  # after first-stage encoding, infer size
     channels: 4               # after first-stage encoding
     monitor: val/loss_simple_ema
     cond_stage_trainable: false
@@ -32,9 +32,14 @@ model:
     first_stage_config:
       target: ldm.models.autoencoder.VQModelInterface
       params:
+        monitor: "val/rec_loss"
+        image_key: image
+        embed_dim: 4
+        n_embed: 8192
+        dims: 3
         # no loss needed
         lossconfig:
-          target: nn.Identity
+          target: torch.nn.Identity
         # copy the following from vq model
         ddconfig:
           double_z: false
@@ -43,11 +48,10 @@ model:
           in_channels: 1
           out_ch: 1
           ch: 128
-          ch_mult: [ 1, 1, 1 ]  
+          ch_mult: [ 1, 1 ]  
           num_res_blocks: 2
           attn_resolutions: []
           dropout: 0.0
-          dims: 3
           attn_type: none
 
     cond_stage_config: 
@@ -72,21 +76,21 @@ data:
     num_workers: 2
     wrap: False
     train:
-      target: ldm.data.base.SimpleDataset
+      target: ldm.data.base.DummyDataset
       params:
         split: train
-        patch_size: [128, 128, 128]
+        output_size: [128, 128, 128]
     validation:
-      target: ldm.data.base.SimpleDataset
+      target: ldm.data.base.DummyDataset
       params:
         split: val
-        patch_size: [128, 128, 128]
+        output_size: [128, 128, 128]
         max_size: 50
     test:
-      target: ldm.data.base.SimpleDataset
+      target: ldm.data.base.DummyDataset
       params:
         split: test
-        patch_size: [128, 128, 128]
+        output_size: [128, 128, 128]
 
 lightning:
   callbacks:

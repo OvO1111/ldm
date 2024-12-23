@@ -1,42 +1,4 @@
 #!/bin/sh
-
-# export exp=$2
-# if [ -f ./dataset.tar ]; then
-#   date
-#   tar -xf datasets.tar -C /dev/shm
-#   date
-# fi
-
-# export exp="ensemble_cdm_128_128_128"; export ngpus=$ngpu; mkdir -p ./runs/$exp; sbatch -D $(pwd) -J $exp -o ./runs/$exp/slurm_out_$2.txt -p smart_health_02 -N 1 -n 1 --cpus-per-task=$(($ngpu*6)) --gpus=$ngpu --mem=$(($ngpu*64))G ./run/run_template.sh ${@:2}
-# export exp="ruijin_cdm_baseline_64_128_128"; export ngpus=$ngpu; mkdir -p ./runs/$exp; sbatch -D $(pwd) -J $exp -o ./runs/$exp/slurm_out_$2.txt -p smart_health_02 -N 1 -n 1 --cpus-per-task=$(($ngpu*4)) --gpus=$ngpu --mem=$(($ngpu*48))G ./run/run_template.sh ${@:2}
-# export exp="brats21_ldm_cvq_128_128_128"; export ngpus=$ngpu; mkdir -p ./runs/$exp; sbatch -D $(pwd) -J $exp -o ./runs/$exp/slurm_out_$2.txt -p smart_health_02 -N 1 -n 1 --cpus-per-task=$(($ngpu*4)) --gpus=$ngpu --mem=$(($ngpu*48))G ./run/run_template.sh ${@:2}
-# export exp="ensemble_tumor_ddpm_128_128_128"
-# export exp="ensemble_anatomical_vq_128_128_128"
-# export exp="ensemblev2_vq_ldm_wo_multinorm_wo_mask"
-# export exp="guidegen_ldm_128_128_128_wo_textcond"
-# export exp="guidegen_ldm_128_128_128_wo_cam"
-# export exp="medsyn_ddpm_128_128_128"
-# export exp="ruijin_2d_vq_ldm_(128)_512_512"
-# export static_exp="ensemblev2_classifier_128_128_128"
-# static_exp="fmcib_event_classifier_64_64_64"
-# export exp=$(yq eval '.model.experiment_name' $2)
-# if [ -z "$exp" ] || [ "$exp" == "null" ]; then
-#     export exp=$static_exp
-#     echo "Failed to extract shell command from JSON file, retreating to $static_exp."
-# fi
-i=$(basename $3)
-export exp="${i%.*}"
-export ngpus=$1
-export scheme=$2
-export config=$3
-
-# export exp="brats21_cdm_128_128_128_fine_ft"
-# export exp="ensemble_multiwinnorm_ldm_vq_128_128_128"
-# export exp='ensemble_ddpm_128_128_128'
-# export exp="brats21_subclass/866f/1100"
-# export exp="test"
-
-mkdir -p ./runs/$exp; sbatch -D $(pwd) -J $exp -o ./runs/$exp/slurm_out_$2.txt -p smart_health_02 -N 1 -n 1 --cpus-per-task=$(($ngpus*4)) --gpus=$ngpus --mem=$(($ngpus*50))G ./run/run_template.sh ${@:4}
-
-# export organ=$2
-# sbatch -D $(pwd) -J seg_msd_$organ -p smart_health_02 -N 1 -n 1 --cpus-per-task=$(($ngpus*8)) --gpus=$ngpus --mem=$(($ngpus*128))G ./run/run_seg.sh ${@:2}
+export exp=cmu_swinunetr ; sbatch -D $(pwd) -J $exp -o outs/out_$exp.txt -p smart_health_02 -N 1 -n 1 --cpus-per-task=8 --gpus=1 --mem=128G --wrap "torchrun --nproc-per-node=1 main.py --base ./configs/downstream/segmentation.yaml -t --name $exp --gpus 0, model.params.backbone_name=swinunetr"
+# export exp=cmu_unetpp ; sbatch -D $(pwd) -J $exp -o outs/out_$exp.txt -p smart_health_02 -N 1 -n 1 --cpus-per-task=8 --gpus=1 --mem=128G --wrap "torchrun --nproc-per-node=1 main.py --base ./configs/downstream/segmentation.yaml -t --name $exp --gpus 0, model.params.backbone_name=unetpp"
+# export exp=cmu_vnet ; sbatch -D $(pwd) -J $exp -o outs/out_$exp.txt -p smart_health_02 -N 1 -n 1 --cpus-per-task=8 --gpus=1 --mem=128G --wrap "torchrun --nproc-per-node=1 main.py --base ./configs/downstream/segmentation.yaml -t --name $exp --gpus 0, model.params.backbone_name=vnet"
