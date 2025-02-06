@@ -60,8 +60,8 @@ class TotalsegOrganType:
         name = name if name in self.organtypes else [i for i in self.organtypes.keys() if i.lower() == name.lower()][0]
         return self.organtypes[name]
 
-TotalsegOrganTypeV1 = TotalsegOrganType("/ailab/user/dailinrui/code/latentdiffusion/dependency/totalseg_v1_label_mapping.txt")
-TotalsegOrganTypeV2 = TotalsegOrganType("/ailab/user/dailinrui/code/latentdiffusion/dependency/totalseg_v2_label_mapping.txt")
+TotalsegOrganTypeV1 = TotalsegOrganType("./dependency/totalseg_v1_label_mapping.txt")
+TotalsegOrganTypeV2 = TotalsegOrganType("./dependency/totalseg_v2_label_mapping.txt")
 
 
 class LabelParser:

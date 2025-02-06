@@ -1,0 +1,98 @@
+model:
+  base_learning_rate: 2e-5
+  train_target: ldm.models.diffusion.cdpm.CategoricalDiffusion
+  test_target: inference.models.InferCategoricalDiffusion
+  params:
+    # diffusion kwargs
+    linear_start: 1e-2
+    linear_end: 0.2
+    log_every_t: 200
+    timesteps: 500
+    num_classes: 21  # include background class
+    mask_key: mask
+    noise_type: categorical
+    conditioning_key: crossattn
+    crossattn_key: prompt_context
+    monitor: val/loss
+    cond_stage_trainable: false
+    use_scheduler: true 
+    scheduler_config:
+      target: torch.optim.lr_scheduler.LinearLR
+      params:
+        start_factor: 1
+        end_factor: 1e-3
+        total_iters: 500
+    use_automatic_optimization: false
+
+    unet_config:
+      target: ldm.modules.diffusionmodules.openaimodel.UNetModel
+      params:
+        in_channels: 21
+        out_channels: 21
+        model_channels: 64
+        attention_resolutions: [8, 16]
+        num_res_blocks: 1
+        channel_mult: [1, 1, 1, 2, 2]
+        num_head_channels: 32
+        use_checkpoint: true  # always use ckpt
+        use_spatial_transformer: true 
+        context_dim: 768
+
+    cond_stage_config: 
+      target: torch.nn.Identity
+
+    test_only_params:
+      # whether use legacy
+      use_legacy: false 
+      parameterization: kl 
+      ckpt_path: /ailab/user/dailinrui-hdd/data/ccdm_pl/ensemblev2_128_128_128_anatomical/checkpoints/epoch=000087.ckpt
+      # make dataset
+      save_dataset: true 
+      save_dataset_path: $path
+      include_keys: [inputs, samples]
+      suffix_keys: 
+        inputs: .nii.gz
+        samples: .nii.gz
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 1
+    num_workers: 8
+    wrap: False
+    train:
+      target: ldm.data.guidegen.SemanticSynthesizerDataset
+      params:
+        split: train
+    validation:
+      target: ldm.data.guidegen.SemanticSynthesizerDataset
+      params:
+        split: val
+        max_num: 5
+    test:
+      target: ldm.data.guidegen.SemanticSynthesizerDataset
+      params:
+        split: val
+
+lightning:
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        train_batch_frequency: 200
+        max_images: 10
+        log_images_kwargs: 
+          ddim_steps: 50
+        logger:
+          inputs: 
+            target: mask_rescale
+            params:
+              n_mask: 21
+          samples:
+            target: mask_rescale
+            params: 
+              n_mask: 21
+
+  trainer:
+    benchmark: true
+    limit_test_batches: 500

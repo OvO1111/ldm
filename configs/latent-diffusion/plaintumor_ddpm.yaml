@@ -10,9 +10,11 @@ model:
     timesteps: 1000
     loss_type: l1
     first_stage_key: image
-    cond_stage_key: label
-    conditioning_key: concat
-    image_size: [48, 48, 48]  # after first-stage encoding, infer size
+    cond_stage_key: 
+      crossattn: text
+      concat: label
+    conditioning_key: hybrid
+    image_size: [128, 128, 128]  # after first-stage encoding, infer size
     channels: 4               # after first-stage encoding
     monitor: val/loss_simple_ema
     cond_stage_trainable: false
@@ -28,38 +30,51 @@ model:
         channel_mult: [1, 2, 4]
         num_head_channels: 32
         use_checkpoint: true  # always use ckpt
+        use_spatial_transformer: true
+        context_dim: 768
 
+    # first_stage_config:
+    #   target: ldm.models.autoencoder.VQModelInterface
+    #   params:
+    #     monitor: "val/rec_loss"
+    #     image_key: image
+    #     embed_dim: 4
+    #     n_embed: 8192
+    #     dims: 3
+    #     # no loss needed
+    #     lossconfig:
+    #       target: torch.nn.Identity
+    #     # copy the following from vq model
+    #     ddconfig:
+    #       double_z: false
+    #       z_channels: 8
+    #       resolution: [128, 128, 128]
+    #       in_channels: 1
+    #       out_ch: 1
+    #       ch: 128
+    #       ch_mult: [ 1, 1, 1 ]  
+    #       num_res_blocks: 2
+    #       attn_resolutions: []
+    #       dropout: 0.0
+    #       attn_type: none
     first_stage_config:
-      target: ldm.models.autoencoder.VQModelInterface
-      params:
-        monitor: "val/rec_loss"
-        image_key: image
-        embed_dim: 4
-        n_embed: 8192
-        dims: 3
-        # no loss needed
-        lossconfig:
-          target: torch.nn.Identity
-        # copy the following from vq model
-        ddconfig:
-          double_z: false
-          z_channels: 8
-          resolution: [192, 192, 192]
-          in_channels: 1
-          out_ch: 1
-          ch: 128
-          ch_mult: [ 1, 1, 1 ]  
-          num_res_blocks: 2
-          attn_resolutions: []
-          dropout: 0.0
-          attn_type: none
+      target: ldm.modules.encoders.modules.IdentityFirstStage
 
     cond_stage_config: 
-      target: ldm.modules.encoders.modules.ResizeConditionEncoder
+      target: ldm.modules.encoders.modules.HybridConditionEncoder
       params:
-        input_size: [192, 192, 192]
-        output_size: [48, 48, 48]
-        resize_mode: nearest
+        # concat_module:
+        #   target: ldm.modules.encoders.modules.ResizeConditionEncoder
+        #   params:
+        #     input_size: [128, 128, 128]
+        #     output_size: [64, 64, 64]
+        #     resize_mode: nearest
+        concat_module:
+          target: torch.nn.Identity
+        crossattn_module:
+          target: ldm.modules.encoders.modules.FrozenBERTEmbedder
+          params:
+            ckpt_path: "/ailab/user/dailinrui-hdd/data/dependency/bert-ernie-health"
 
   test_only_params:
     ckpt_path: $path
@@ -68,13 +83,6 @@ model:
     suffix_keys: 
       samples: .nii.gz
       mask: .nii.gz
-
-    cond_stage_config: 
-      target: ldm.modules.encoders.modules.ResizeConditionEncoder
-      params:
-        input_size: [192, 192, 192]
-        output_size: [192, 192, 192]
-        resize_mode: nearest
 
 data:
   target: main.DataModuleFromConfig
@@ -86,18 +94,18 @@ data:
       target: ldm.data.base.DummyDataset
       params:
         split: train
-        output_size: [192, 192, 192]
+        output_size: [128, 128, 128]
     validation:
       target: ldm.data.base.DummyDataset
       params:
         split: val
-        output_size: [192, 192, 192]
+        output_size: [128, 128, 128]
         max_size: 50
     test:
       target: ldm.data.base.DummyDataset
       params:
         split: test
-        output_size: [192, 192, 192]
+        output_size: [128, 128, 128]
 
 lightning:
   callbacks:

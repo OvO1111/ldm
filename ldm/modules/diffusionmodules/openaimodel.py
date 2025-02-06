@@ -645,8 +645,8 @@ class UNetModel(nn.Module):
                 use_zero_module=use_zero_module,
                 use_new_attention_order=use_new_attention_order,
             ) if not use_spatial_transformer else SpatialTransformer(
-                            ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim, dims=dims
-                        ),
+                ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim, dims=dims
+            ),
             ResBlock(
                 ch,
                 time_embed_dim,

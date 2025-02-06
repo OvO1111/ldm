@@ -220,7 +220,7 @@ class IdentityFirstStage(nn.Module):
 class FrozenBERTEmbedder(AbstractEncoder):
     use_text_split = False
     bert_max_length = 512
-    def __init__(self, ckpt_path="/ailab/user/dailinrui/data/dependency/bert-ernie-health",
+    def __init__(self, ckpt_path="/ailab/user/dailinrui-hdd/data/dependency/bert-ernie-health",
                  device="cuda", freeze=True, max_length=512):
         super().__init__()
         self.device = device

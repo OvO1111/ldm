@@ -2,6 +2,7 @@ import importlib
 
 import torch
 import numpy as np
+from torch import nn
 from collections import abc
 from einops import rearrange
 from functools import partial
@@ -12,6 +13,42 @@ from queue import Queue
 
 from inspect import isfunction
 from PIL import Image, ImageDraw, ImageFont
+
+
+def set_precision(precision):
+    if precision in [16, "16", "fp16", torch.float16]:
+        p = torch.float16
+        fn = lambda tensor: tensor.half()
+    elif precision in ["bf16", torch.bfloat16]:
+        p = torch.bfloat16
+        fn = lambda tensor: tensor.bfloat16()
+    elif precision in [32, "32", "fp32", torch.float32]:
+        p = torch.float32
+        fn = lambda tensor: tensor.float()
+    elif precision in [64, "64", "fp64", "double", torch.double, torch.float64]:
+        p = torch.float64
+        fn = lambda tensor: tensor.double()
+    else:
+        raise ValueError(f"Unsupported precision: {precision}")
+    
+    def _impl(x):   
+        x.dtype = p
+        for module in x.modules():
+            if isinstance(module, nn.modules.conv._ConvNd):
+                module.weight.data = fn(module.weight.data)
+                if module.bias is not None: module.bias.data = fn(module.bias.data)
+            elif isinstance(module, (
+                nn.modules.normalization.GroupNorm,
+                nn.modules.normalization.LayerNorm,
+                nn.modules.batchnorm._BatchNorm
+            )):
+                module.weight.data = fn(module.weight.data)
+                module.bias.data = fn(module.bias.data)
+            elif isinstance(module, nn.Linear):
+                module.weight.data = fn(module.weight.data) 
+                if module.bias is not None:
+                    module.bias.data = fn(module.bias.data)
+    return p, _impl
 
 
 def log_txt_as_img(wh, xc, size=10):

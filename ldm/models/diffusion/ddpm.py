@@ -9,7 +9,7 @@ https://github.com/CompVis/taming-transformers
 import torch
 import torch.nn as nn
 import numpy as np
-import torchio as tio
+import SimpleITK as sitk
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import LambdaLR
 from einops import rearrange, repeat
@@ -20,7 +20,7 @@ from omegaconf.dictconfig import DictConfig
 from torchvision.utils import make_grid
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 
-from ldm.util import log_txt_as_img, exists, default, ismap, isimage, mean_flat, count_params, instantiate_from_config
+from ldm.util import log_txt_as_img, exists, default, isimage, mean_flat, count_params, instantiate_from_config, set_precision
 from ldm.modules.ema import LitEma
 from ldm.models.diffusion.sampling.ddim import DDIMSampler
 from ldm.modules.distributions.distributions import normal_kl, DiagonalGaussianDistribution
@@ -37,42 +37,6 @@ def disabled_train(self, mode=True):
     """Overwrite model.train with this function to make sure train/eval mode
     does not change anymore."""
     return self
-
-
-def set_precision(precision):
-    if precision in [16, "16", "fp16", torch.float16]:
-        p = torch.float16
-        fn = lambda tensor: tensor.half()
-    elif precision in ["bf16", torch.bfloat16]:
-        p = torch.bfloat16
-        fn = lambda tensor: tensor.bfloat16()
-    elif precision in [32, "32", "fp32", torch.float32]:
-        p = torch.float32
-        fn = lambda tensor: tensor.float()
-    elif precision in [64, "64", "fp64", "double", torch.double, torch.float64]:
-        p = torch.float64
-        fn = lambda tensor: tensor.double()
-    else:
-        raise ValueError(f"Unsupported precision: {precision}")
-    
-    def _impl(x):   
-        x.dtype = p
-        for module in x.modules():
-            if isinstance(module, nn.modules.conv._ConvNd):
-                module.weight.data = fn(module.weight.data)
-                module.bias.data = fn(module.bias.data)
-            elif isinstance(module, (
-                nn.modules.normalization.GroupNorm,
-                nn.modules.normalization.LayerNorm,
-                nn.modules.batchnorm._BatchNorm
-            )):
-                module.weight.data = fn(module.weight.data)
-                module.bias.data = fn(module.bias.data)
-            elif isinstance(module, nn.Linear):
-                module.weight.data = fn(module.weight.data) 
-                if module.bias is not None:
-                    module.bias.data = fn(module.bias.data)
-    return p, _impl
 
 
 def uniform_on_device(r1, r2, shape, device):
@@ -1338,8 +1302,6 @@ class LatentDiffusion(DDPM):
                 log['conditioning'] = xc
             elif isimage(xc):
                 log["conditioning"] = xc
-            if ismap(xc):
-                log["original_conditioning"] = self.to_rgb(xc)
 
         if plot_diffusion_rows:
             # get diffusion row
@@ -1448,15 +1410,6 @@ class LatentDiffusion(DDPM):
                 }]
             return [opt], scheduler
         return opt
-
-    @torch.no_grad()
-    def to_rgb(self, x):
-        x = x.to(self.dtype)
-        if not hasattr(self, "colorize"):
-            self.colorize = torch.randn(3, x.shape[1], 1, 1).to(x)
-        x = nn.functional.conv2d(x, weight=self.colorize)
-        x = 2. * (x - x.min()) / (x.max() - x.min()) - 1.
-        return x
 
 
 class DiffusionWrapper(pl.LightningModule):

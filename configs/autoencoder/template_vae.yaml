@@ -1,34 +1,31 @@
 model:
   base_learning_rate: 2e-5
-  train_target: ldm.models.autoencoder.VQModel
-  test_target: inference.models.InferAutoencoderVQ
+  train_target: ldm.models.autoencoder.AutoencoderKL
   params:
-    monitor: "val/rec_loss"
-    image_key: $key
-    embed_dim: 8
-    n_embed: 8192
+    monitor: val/reconstruction_loss
+    image_key: image
+    embed_dim: 4
+    # n_embed: 8192
     dims: 3
     lossconfig:
-      target: ldm.modules.losses.VQLPIPSWithDiscriminator
+      target: ldm.modules.losses.LPIPSWithDiscriminator
       params:
         disc_start: 20001
         disc_weight: 0.5
-        n_classes: 8192  # =n_embed
         gan_feat_weight: 1.
-        nframes_select: 1  # 1 as in medicaldiffusion
+        n_frames_to_select: 3  # 1 as in medicaldiffusion
 
     ddconfig:
       double_z: false
-      z_channels: 8
+      z_channels: 4
       resolution: [128, 128, 128]
       in_channels: 1
       out_ch: 1
-      ch: 128
-      ch_mult: [ 1, 1, 1 ]  
+      ch: 96
+      ch_mult: [ 1, 2, 4 ]  
       num_res_blocks: 2
       attn_resolutions: []
       dropout: 0.0
-      dims: 3
       attn_type: none
 
 data:
@@ -42,20 +39,16 @@ data:
       params:
         split: train
         patch_size: [128, 128, 128]
+        use_aug: true
         any_dict: 
-          image: $path
-          label: $path
+          image: /ailab/user/dailinrui-hdd/data/cttr.list
     validation:
       target: ldm.data.base.SimpleDataset
       params:
         split: val
         patch_size: [128, 128, 128]
-        max_size: 200
-    test:
-      target: ldm.data.base.SimpleDataset
-      params:
-        split: test
-        patch_size: [128, 128, 128]
+        any_dict: 
+          image: /ailab/user/dailinrui-hdd/data/ctval.list
 
 lightning:
   callbacks:
@@ -69,11 +62,7 @@ lightning:
         logger:
           inputs: 
             target: image_rescale
-          conditioning:
-            target: image_rescale
-          reconstruction:
-            target: image_rescale
-          samples:
+          reconstructions:
             target: image_rescale
 
   trainer:

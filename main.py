@@ -122,7 +122,7 @@ def get_parser(**parser_kwargs):
         "-l",
         "--logdir",
         type=str,
-        default="/ailab/user/dailinrui/data/ldm",
+        default="/ailab/user/dailinrui-hdd/data/ldm",
         help="directory for logging dat shit",
     )
     parser.add_argument(
@@ -572,14 +572,19 @@ if __name__ == "__main__":
         trainer_config["accelerator"] = "gpu"
         for k in nondefault_trainer_args(opt):
             trainer_config[k] = getattr(opt, k)
+        cpu = False
         if not "gpus" in trainer_config:
-            del trainer_config["strategy"], trainer_config["accelerator"]
-            cpu = True
+            if torch.cuda.is_available(): 
+                trainer_config['gpus'] = os.environ.get("CUDA_VISIBLE_DEVICES", "0") or "0"
+                print(f"Running on GPUs {trainer_config['gpus']}")
+                trainer_config["devices"] = len(re.sub(r"[^0-9]+", "", trainer_config['gpus']))
+            else:
+                del trainer_config["strategy"], trainer_config["accelerator"]
+                cpu = True
         else:
             gpuinfo = trainer_config["gpus"]
             print(f"Running on GPUs {gpuinfo}")
             trainer_config["devices"] = len(re.sub(r"[^0-9]+", "", gpuinfo))
-            cpu = False
         trainer_opt = argparse.Namespace(**trainer_config)
         lightning_config.trainer = trainer_config
 
@@ -711,9 +716,9 @@ if __name__ == "__main__":
                     "max_images": 10,
                     "is_training": opt.train,
                     "dataset_length": {
-                        "train": len(data.datasets["train"]),
-                        "val": len(data.datasets["validation"]),
-                        "test": len(data.datasets["test"]),
+                        "train": len(data.datasets.get("train", [])),
+                        "val": len(data.datasets.get("validation", [])),
+                        "test": len(data.datasets.get("test", [])),
                     }
                 }
             }

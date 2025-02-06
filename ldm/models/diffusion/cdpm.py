@@ -258,9 +258,9 @@ class CategoricalDiffusion(pl.LightningModule):
         if key == self.mask_key:
             out = rearrange(nn.functional.one_hot(out.long(), self.num_classes), "b 1 ... n -> b n ...")
         if key == self.concat_key:
-            return getattr(self, "concat_encoder", torch.nn.Identity)(out)
+            return getattr(self, "concat_encoder", torch.nn.Identity())(out)
         if key == self.crossattn_key:
-            return getattr(self, "crossattn_encoder", torch.nn.Identity)(out)
+            return getattr(self, "crossattn_encoder", torch.nn.Identity())(out)
         else: 
             return out
         
@@ -337,11 +337,11 @@ class CategoricalDiffusion(pl.LightningModule):
         opt = torch.optim.AdamW(parameters, self.learning_rate)
         return opt
         
-    def log_images(self, batch, split="train", init_t=None, end_t=0, verbose=False):
+    def log_images(self, batch, split="train", init_t=None, end_t=0, verbose=False, **kw):
         logs = {}
         x0 = self.get_input(batch, self.mask_key)
-        conditions = {"c_crossattn": self.get_input(batch, self.crossattn_key),
-                      "c_concat": self.get_input(batch, self.concat_key)}
+        conditions = {"c_crossattn": [self.get_input(batch, self.crossattn_key)],
+                      "c_concat": [self.get_input(batch, self.concat_key)]}
         b = x0.shape[0]
         if 'c_concat' in conditions and self.concat_key is not None:
             logs['conditioning'] = batch.get(self.concat_key)
@@ -382,7 +382,7 @@ class DiffusionWrapper(pl.LightningModule):
             xc = torch.cat([x] + c_concat, dim=1)
             out = self.diffusion_model(xc, t)
         elif self.conditioning_key == 'crossattn':
-            cc = torch.cat([c_crossattn], 1)
+            cc = torch.cat(c_crossattn, 1)
             out = self.diffusion_model(x, t, context=cc)
         elif self.conditioning_key == 'hybrid':
             xc = torch.cat([x] + [c_concat], dim=1)

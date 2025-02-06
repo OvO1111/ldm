@@ -1,6 +1,7 @@
 # ignore dependent ckpts 
 dependency/*
 compr/
+rebuttal/*
 
 # ignore slurm runs
 run/
@@ -17,3 +18,5 @@ helpers/
 outs/
 
 *.json
+
+*rebuttal.json
