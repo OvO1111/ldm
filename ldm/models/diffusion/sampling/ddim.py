@@ -139,10 +139,11 @@ class DDIMSampler(object):
         verbose=False,
         **kwargs
     ):
+        dtype = getattr(cond, "dtype", torch.float32) if cond is not None else torch.float32
         device = self.model.betas.device
         b = shape[0]
         if x_T is None:
-            img = torch.randn(shape, device=device, dtype=cond.dtype if cond is not None else torch.float32)
+            img = torch.randn(shape, device=device, dtype=dtype)
         else:
             img = x_T
 

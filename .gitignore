@@ -19,4 +19,5 @@ outs/
 
 *.json
 
-*rebuttal.json
+*rebuttal.yaml
+configs/latent-diffusion/plain*

@@ -10,6 +10,7 @@ import numpy as np
 from ldm.util import instantiate_from_config
 from transformers import AutoTokenizer, AutoModel
 from ldm.modules.x_transformer import Encoder, TransformerWrapper  # TODO: can we directly rely on lucidrains code and simply add this as a reuirement? --> test
+from transformers.models.ernie.modeling_ernie import ErnieModel
 
 
 class AbstractEncoder(nn.Module):
@@ -287,8 +288,8 @@ class FrozenBERTEmbedder(AbstractEncoder):
             text = self._merge_text_list(*text)
         batch_encoding = self.tokenizer(text, truncation=True, max_length=self.bert_max_length, return_length=True,
                                         return_overflowing_tokens=False, padding="max_length", return_tensors="pt")
-        tokens = batch_encoding["input_ids"].to(self.device)
-        mask = batch_encoding["attention_mask"].to(self.device)
+        tokens = batch_encoding["input_ids"].to(self.device).long()
+        mask = batch_encoding["attention_mask"].to(self.device).long()
         outputs = self.transformer(input_ids=tokens, attention_mask=mask, return_dict=True)
 
         z = outputs.last_hidden_state

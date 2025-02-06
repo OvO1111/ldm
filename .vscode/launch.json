@@ -17,7 +17,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "./main.py",
-            "args": ["-b", "./configs/latent-diffusion/rebuttal.yaml", "-t", "--debug"],
+            "args": ["-b", "./configs/latent-diffusion/plaintumor_ddpm.yaml", "-t", "--debug"],
             "console": "integratedTerminal"
         },
         {
